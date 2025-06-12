@@ -1,0 +1,2 @@
+lsst-dax-apdb @ git+https://github.com/lsst/dax_apdb@main
+lsst-daf-butler @ git+https://github.com/lsst/daf_butler@main
