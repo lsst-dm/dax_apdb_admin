@@ -44,6 +44,7 @@ def main(args: Sequence[str] | None = None) -> None:
 
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _dump_subcommand(subparsers)
+    _delete_subcommand(subparsers)
 
     parsed_args = parser.parse_args(args)
     log_cli.process_args(parsed_args)
@@ -71,3 +72,31 @@ def _dump_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "-v", "--verbose", default=0, action="count", help="Verbose output, can use many times."
     )
     parser.set_defaults(method=scripts.dump_visit)
+
+
+def _delete_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("delete", help="Delete APDB contents.")
+    subparsers = parser.add_subparsers(title="available subcommands", required=True)
+    _delete_visit_subcommand(subparsers)
+
+
+def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("visit", help="Delete DiaObjects first created in a particular visit.")
+    parser.add_argument("butler_config", help="Butler configuration URI.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("instrument", help="Instrument name.")
+    parser.add_argument("visit", type=int, help="Visit number.")
+    parser.add_argument("detectors", type=int, nargs="*", help="Detector number(s).")
+    parser.add_argument(
+        "--delete",
+        default=False,
+        action="store_true",
+        help="Actually delete, by default only print records to be deleted.",
+    )
+    parser.add_argument(
+        "--no-sources",
+        default=False,
+        action="store_true",
+        help="Only selete objects that have no associated sources, and delete associated forced sources.",
+    )
+    parser.set_defaults(method=scripts.delete_visit)

@@ -12,7 +12,7 @@ config.log
 # Built by sconsUtils
 version.py
 bin/
-python/lsst_dax_apdb_admin.dist-info/
+python/lsst_dax_apdb_admin.dist-info
 
 # Pytest
 tests/.tests

@@ -25,46 +25,16 @@ __all__ = ["dump_visit"]
 
 import logging
 from collections import Counter
-from collections.abc import Collection, Mapping
-from typing import Any
+from collections.abc import Collection
 
-import pandas
 from astropy.time import Time
 
-from lsst import sphgeom
 from lsst.daf.butler import Butler
 from lsst.dax.apdb import Apdb
 
-from .. import model
+from .. import model, utils
 
 _LOG = logging.getLogger(__name__)
-
-
-def _filter_region(objects: pandas.DataFrame, region: sphgeom.Region) -> pandas.DataFrame:
-    """Filter out objects from a catalog which are outside region.
-
-    Parameters
-    ----------
-    objects : `pandas.DataFrame`
-        Catalog containing DiaObject records.
-    region : `sphgeom.Region`
-        Region to filter records to.
-
-    Returns
-    -------
-    dataframe : `pandas.DataFrame`
-        Filtered DataFrame with records contained in the region.
-    """
-    if objects.empty:
-        return objects
-
-    def in_region(obj: Mapping[str, Any]) -> bool:
-        lonLat = sphgeom.LonLat.fromDegrees(obj["ra"], obj["dec"])
-        dir_obj = sphgeom.UnitVector3d(lonLat)
-        return region.contains(dir_obj)
-
-    mask = objects.apply(in_region, axis=1, result_type="reduce")
-    return objects[mask]
 
 
 def dump_visit(
@@ -125,7 +95,7 @@ def dump_visit(
 
         # Get objects.sources from the region.
         objects_df = apdb.getDiaObjects(region)
-        objects_df = _filter_region(objects_df, region)
+        objects_df = utils.filter_region(objects_df, region)
         object_ids = set(objects_df["diaObjectId"])
         print(f"Found {len(object_ids)} DiaObjects")
 
@@ -145,6 +115,9 @@ def dump_visit(
             oid: source_group for oid, source_group in source_groups.items() if source_group[0].visit == visit
         }
         print(f"{len(new_source_groups)} new DiaObjects in this visit/detector")
+        no_source_object_ids = {oid for oid in object_ids if oid not in source_groups}
+        if no_source_object_ids:
+            print(f"{len(no_source_object_ids)} no-source DiaObjects in this visit/detector")
 
         if verbose > 0:
             # Dump everything.
@@ -166,7 +139,7 @@ def dump_visit(
                             f"visit={sinfo.visit} detector={sinfo.detector} "
                             f"time_processed={sinfo.time_processed} "
                             f"midpointMjdTai={sinfo.midpointMjdTai} "
-                            f"ra={oinfo.ra} dec={oinfo.dec}"
+                            f"ra={sinfo.ra} dec={sinfo.dec}"
                         )
 
                 if verbose > 2:
@@ -179,7 +152,7 @@ def dump_visit(
                             f"visit={fsinfo.visit} detector={fsinfo.detector} "
                             f"time_processed={fsinfo.time_processed} "
                             f"midpointMjdTai={fsinfo.midpointMjdTai} "
-                            f"ra={oinfo.ra} dec={oinfo.dec}"
+                            f"ra={fsinfo.ra} dec={fsinfo.dec}"
                         )
 
     if first_visit_count:

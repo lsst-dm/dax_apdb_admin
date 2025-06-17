@@ -19,4 +19,5 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .delete_visit import delete_visit
 from .dump_visit import dump_visit
