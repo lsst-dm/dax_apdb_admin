@@ -43,6 +43,7 @@ def main(args: Sequence[str] | None = None) -> None:
     log_cli = LoggingCli(parser)
 
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
+    _partition_subcommand(subparsers)
     _dump_subcommand(subparsers)
     _delete_subcommand(subparsers)
 
@@ -100,3 +101,44 @@ def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
         help="Only selete objects that have no associated sources, and delete associated forced sources.",
     )
     parser.set_defaults(method=scripts.delete_visit)
+
+
+def _partition_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("partition", help="Partition information and management.")
+    subparsers = parser.add_subparsers(title="available subcommands", required=True)
+    _partition_show_region_subcommand(subparsers)
+    _partition_show_period_subcommand(subparsers)
+    _partition_show_time_part_subcommand(subparsers)
+
+
+def _partition_show_region_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("show-region", help="Show region corresponding to spatial partitions.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("partitions", type=int, nargs="+", help="Partition number(s).")
+    parser.set_defaults(method=scripts.partition_show_region)
+
+
+def _partition_show_period_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "show-period", help="Show time period corresponding to temporal partitions."
+    )
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("partitions", type=int, nargs="+", help="Partition number(s).")
+    parser.set_defaults(method=scripts.partition_show_period)
+
+
+def _partition_show_time_part_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "show-time-part", help="Show time partition corresponding to timestamp(s)."
+    )
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument(
+        "timestamps",
+        type=str,
+        nargs="*",
+        help="Timestamps in ISOT format and TAI scale. If not provided then current time is used.",
+    )
+    parser.add_argument(
+        "-l", "--long", default=False, action="store_true", help="Show partition period for each entry."
+    )
+    parser.set_defaults(method=scripts.partition_show_time_part)
