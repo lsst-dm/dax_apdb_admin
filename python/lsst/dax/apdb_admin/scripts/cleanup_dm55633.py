@@ -33,7 +33,7 @@ from typing import NamedTuple, cast
 import cassandra.concurrent
 from astropy.time import Time
 
-from lsst.daf.butler import Butler, CollectionType
+from lsst.daf.butler import Butler
 from lsst.dax.apdb import Apdb, ApdbTables
 from lsst.dax.apdb.cassandra import ApdbCassandra
 from lsst.dax.apdb.cassandra.apdbCassandraSchema import ExtraTables
@@ -258,54 +258,6 @@ def find_visit_detector(apdb_config: str) -> None:
     for vd, vd_chunks in sorted(vds):
         fmt_chunks = " ".join(str(chunk) for chunk in sorted(vd_chunks))
         print(f"{vd.visit} {vd.detector:3d} {fmt_chunks}")
-
-
-def find_visit_detector_butler(
-    butler_pp: str, butler_daytime: str, collections_pp: str, collections_daytime: str
-) -> None:
-    """Find visit-detector combinations that were processed more than once.
-
-    Parameters
-    ----------
-    butler_pp : `str`
-        Butler with PP outputs.
-    butler_daytime : `str`
-        Butler with daytime outputs.
-    collections_pp : `str`
-        Pattern for collection names in PP butler.
-    collections_daytime : `str`
-        Pattern for collection names in daytime butler.
-    """
-    butler = Butler.from_config(butler_pp)
-    collections = butler.collections.query(collections_pp, collection_types=CollectionType.RUN)
-    _LOG.info("Found %d collections in PP Butler", len(collections))
-
-    refs = butler.query_datasets("dia_source_apdb", collections=collections, instrument="LSSTCam", limit=None)
-    _LOG.info("Found %d datasets in PP Butler", len(refs))
-
-    vd_map: dict[VisitDetector, list[str]] = defaultdict(list)
-    for ref in refs:
-        date = ref.run.split("/")[2].partition("-")[2]
-        vd_map[VisitDetector(cast(int, ref.dataId["visit"]), cast(int, ref.dataId["detector"]))].append(date)
-
-    butler = Butler.from_config(butler_daytime)
-    collections = butler.collections.query(collections_daytime, collection_types=CollectionType.RUN)
-    _LOG.info("Found %d collections in daytime Butler", len(collections))
-
-    refs = butler.query_datasets("dia_source_apdb", collections=collections, instrument="LSSTCam", limit=None)
-    _LOG.info("Found %d datasets in daytime Butler", len(refs))
-
-    for ref in refs:
-        date = ref.run.split("/")[2].partition("-")[2]
-        vd_map[VisitDetector(cast(int, ref.dataId["visit"]), cast(int, ref.dataId["detector"]))].append(date)
-
-    # Dump entries with more than one processing.
-    vds = [(vd, dates) for vd, dates in vd_map.items() if len(dates) > 1]
-    visits = {vd.visit for vd, _ in vds}
-    _LOG.info("Found %d visit-detectors from %d visits", len(vds), len(visits))
-    for vd, dates in sorted(vds):
-        fmt_dates = " ".join(str(date) for date in sorted(dates))
-        print(f"{vd.visit} {vd.detector:3d} {fmt_dates}")
 
 
 def sources_to_delete(apdb_config: str, visit_detector: str) -> None:

@@ -44,7 +44,6 @@ def main(args: Sequence[str] | None = None) -> None:
 
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _find_subcommand(subparsers)
-    _find_butler_subcommand(subparsers)
     _sources_to_delete_subcommand(subparsers)
     _sources_to_keep_subcommand(subparsers)
     _find_sources_subcommand(subparsers)
@@ -63,25 +62,6 @@ def _find_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("find", help="Find visit/detector pairs processed multiple times.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.set_defaults(method=cleanup_dm55633.find_visit_detector)
-
-
-def _find_butler_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "find-butler", help="Find visit/detector pairs processed multiple times in Butler."
-    )
-    parser.add_argument("butler_pp", help="Butler with PP outputs.")
-    parser.add_argument("butler_daytime", help="Butler with daytime outputs.")
-    parser.add_argument(
-        "--collections-pp",
-        help="Pattern for collection names in PP butler, default: %(default)s.",
-        default="LSSTCam/prompt/output-2026-02-*/ApPipe/*",
-    )
-    parser.add_argument(
-        "--collections-daytime",
-        help="Pattern for collection names in PP butler, default: %(default)s.",
-        default="LSSTCam/prompt/output-2026-0[23]-*/daytime/2026*",
-    )
-    parser.set_defaults(method=cleanup_dm55633.find_visit_detector_butler)
 
 
 def _sources_to_delete_subcommand(subparsers: argparse._SubParsersAction) -> None:
