@@ -21,19 +21,19 @@
 
 from __future__ import annotations
 
-__all__ = ["find_duplicates"]
+__all__ = []
 
 import csv
 import logging
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterator
 from typing import NamedTuple, cast
 
 import cassandra.concurrent
 from astropy.time import Time
 
-from lsst.daf.butler import Butler
+from lsst.daf.butler import Butler, CollectionType
 from lsst.dax.apdb import Apdb, ApdbTables
 from lsst.dax.apdb.cassandra import ApdbCassandra
 from lsst.dax.apdb.cassandra.apdbCassandraSchema import ExtraTables
@@ -44,6 +44,18 @@ from lsst.sphgeom import Angle, UnitVector3d
 from lsst.utils.iteration import chunk_iterable
 
 _LOG = logging.getLogger(__name__)
+
+
+class VisitDetector(NamedTuple):
+    visit: int
+    detector: int
+
+    @classmethod
+    def from_file(cls, path: str) -> Iterator[tuple[VisitDetector, tuple[int, ...]]]:
+        with open(path, newline="") as file:
+            for line in file:
+                words = line.strip().split()
+                yield (VisitDetector(int(words[0]), int(words[1])), tuple(sorted(int(w) for w in words[2:])))
 
 
 class SourceRecord(NamedTuple):
@@ -57,6 +69,27 @@ class SourceRecord(NamedTuple):
     visit: int
     detector: int
     midpointMjdTai: float
+
+    @classmethod
+    def from_csv(cls, path: str) -> Iterator[SourceRecord]:
+        with open(path, newline="") as csv_file:
+            for row in csv.DictReader(csv_file):
+                yield cls.from_csv_dict(row)
+
+    @classmethod
+    def from_csv_dict(cls, csv_dict: dict[str, str]) -> SourceRecord:
+        return SourceRecord(
+            time_part=int(csv_dict["time_part"]),
+            apdb_part=int(csv_dict["apdb_part"]),
+            diaSourceId=int(csv_dict["diaSourceId"]),
+            diaObjectId=int(csv_dict["diaObjectId"]) if csv_dict["diaObjectId"] else None,
+            ssObjectId=int(csv_dict["ssObjectId"]) if csv_dict["ssObjectId"] else None,
+            ra=float(csv_dict["ra"]),
+            dec=float(csv_dict["dec"]),
+            visit=int(csv_dict["visit"]),
+            detector=int(csv_dict["detector"]),
+            midpointMjdTai=float(csv_dict["midpointMjdTai"]),
+        )
 
     @property
     def cmp_val(self) -> tuple:
@@ -83,6 +116,26 @@ class ReplicaSourceRecord(NamedTuple):
     dec: float
     visit: int
     detector: int
+
+    @classmethod
+    def from_csv(cls, path: str) -> Iterator[ReplicaSourceRecord]:
+        with open(path, newline="") as csv_file:
+            for row in csv.DictReader(csv_file):
+                yield cls.from_csv_dict(row)
+
+    @classmethod
+    def from_csv_dict(cls, csv_dict: dict[str, str]) -> ReplicaSourceRecord:
+        return cls(
+            diaSourceId=int(csv_dict["diaSourceId"]),
+            diaObjectId=int(csv_dict["diaObjectId"]) if csv_dict["diaObjectId"] else None,
+            ssObjectId=int(csv_dict["ssObjectId"]) if csv_dict["ssObjectId"] else None,
+            apdb_replica_chunk=int(csv_dict["apdb_replica_chunk"]),
+            apdb_replica_subchunk=int(csv_dict["apdb_replica_subchunk"]),
+            ra=float(csv_dict["ra"]),
+            dec=float(csv_dict["dec"]),
+            visit=int(csv_dict["visit"]),
+            detector=int(csv_dict["detector"]),
+        )
 
     @property
     def cmp_val(self) -> tuple:
@@ -124,15 +177,40 @@ class ReplicaSourceRecord(NamedTuple):
         return result
 
 
-def find_duplicates(apdb_config: str) -> None:
-    """Find duplicated DiaSources in replica table.
+class ReplicaObjectRecord(NamedTuple):
+    diaObjectId: int
+    validityStartMjdTai: float
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    ra: float
+    dec: float
+
+    @classmethod
+    def from_csv(cls, path: str) -> Iterator[ReplicaObjectRecord]:
+        with open(path, newline="") as csv_file:
+            for row in csv.DictReader(csv_file):
+                yield cls.from_csv_dict(row)
+
+    @classmethod
+    def from_csv_dict(cls, csv_dict: dict[str, str]) -> ReplicaObjectRecord:
+        return cls(
+            diaObjectId=int(csv_dict["diaObjectId"]),
+            validityStartMjdTai=float(csv_dict["validityStartMjdTai"]),
+            apdb_replica_chunk=int(csv_dict["apdb_replica_chunk"]),
+            apdb_replica_subchunk=int(csv_dict["apdb_replica_subchunk"]),
+            ra=float(csv_dict["ra"]),
+            dec=float(csv_dict["dec"]),
+        )
+
+
+def find_visit_detector(apdb_config: str) -> None:
+    """Find visit-detector combinations that were processed more than once.
 
     Parameters
     ----------
     apdb_config : `str`
         APDB configuration location.
     """
-    # No need to instantiate Apdb, we can look at config.
     apdb = Apdb.from_uri(apdb_config)
     assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
 
@@ -150,7 +228,7 @@ def find_duplicates(apdb_config: str) -> None:
     # First run query that only finds duplicated diaSourceIds.
     table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaSource])
 
-    query = Select(config.keyspace, table_name, ["diaSourceId"])
+    query = Select(config.keyspace, table_name, ["visit", "detector", "apdb_replica_chunk"])
     query = query.where(C("apdb_replica_chunk") == 0)
     query = query.where(C("apdb_replica_subchunk") == 0)
     statement = context.stmt_factory(query, prepare=True)
@@ -161,7 +239,7 @@ def find_duplicates(apdb_config: str) -> None:
             queries.append((statement, (chunk.id, subchunk)))
 
     records = cast(
-        list[tuple[int]],
+        list[tuple[int, int, int]],
         select_concurrent(
             context.session,
             queries,
@@ -169,13 +247,118 @@ def find_duplicates(apdb_config: str) -> None:
             config.connection_config.read_concurrency,
         ),
     )
-    counters = Counter(row[0] for row in records)
-    duplicate_ids = {src_id for src_id, count in counters.items() if count > 1}
-    _LOG.info("Found %d duplicate DiaSources", len(duplicate_ids))
-    if not duplicate_ids:
-        return
+    vd_map: dict[VisitDetector, set[int]] = defaultdict(set)
+    for row in records:
+        vd_map[VisitDetector(*row[:2])].add(row[2])
 
-    # Now get more info about each duplicate
+    # Dump entries with more than one processing.
+    vds = [(vd, chunks) for vd, chunks in vd_map.items() if len(chunks) > 1]
+    visits = {vd.visit for vd, _ in vds}
+    _LOG.info("Found %d visit-detectors from %d visits", len(vds), len(visits))
+    for vd, vd_chunks in sorted(vds):
+        fmt_chunks = " ".join(str(chunk) for chunk in sorted(vd_chunks))
+        print(f"{vd.visit} {vd.detector:3d} {fmt_chunks}")
+
+
+def find_visit_detector_butler(
+    butler_pp: str, butler_daytime: str, collections_pp: str, collections_daytime: str
+) -> None:
+    """Find visit-detector combinations that were processed more than once.
+
+    Parameters
+    ----------
+    butler_pp : `str`
+        Butler with PP outputs.
+    butler_daytime : `str`
+        Butler with daytime outputs.
+    collections_pp : `str`
+        Pattern for collection names in PP butler.
+    collections_daytime : `str`
+        Pattern for collection names in daytime butler.
+    """
+    butler = Butler.from_config(butler_pp)
+    collections = butler.collections.query(collections_pp, collection_types=CollectionType.RUN)
+    _LOG.info("Found %d collections in PP Butler", len(collections))
+
+    refs = butler.query_datasets("dia_source_apdb", collections=collections, instrument="LSSTCam", limit=None)
+    _LOG.info("Found %d datasets in PP Butler", len(refs))
+
+    vd_map: dict[VisitDetector, list[str]] = defaultdict(list)
+    for ref in refs:
+        date = ref.run.split("/")[2].partition("-")[2]
+        vd_map[VisitDetector(cast(int, ref.dataId["visit"]), cast(int, ref.dataId["detector"]))].append(date)
+
+    butler = Butler.from_config(butler_daytime)
+    collections = butler.collections.query(collections_daytime, collection_types=CollectionType.RUN)
+    _LOG.info("Found %d collections in daytime Butler", len(collections))
+
+    refs = butler.query_datasets("dia_source_apdb", collections=collections, instrument="LSSTCam", limit=None)
+    _LOG.info("Found %d datasets in daytime Butler", len(refs))
+
+    for ref in refs:
+        date = ref.run.split("/")[2].partition("-")[2]
+        vd_map[VisitDetector(cast(int, ref.dataId["visit"]), cast(int, ref.dataId["detector"]))].append(date)
+
+    # Dump entries with more than one processing.
+    vds = [(vd, dates) for vd, dates in vd_map.items() if len(dates) > 1]
+    visits = {vd.visit for vd, _ in vds}
+    _LOG.info("Found %d visit-detectors from %d visits", len(vds), len(visits))
+    for vd, dates in sorted(vds):
+        fmt_dates = " ".join(str(date) for date in sorted(dates))
+        print(f"{vd.visit} {vd.detector:3d} {fmt_dates}")
+
+
+def sources_to_delete(apdb_config: str, visit_detector: str) -> None:
+    """Find DiaSources to be deleted.
+
+    Parameters
+    ----------
+    apdb_config : `str`
+        APDB configuration location.
+    visit_detector : `str`
+        Path to visit-detector file produced by `find_visit_detector`.
+    """
+    vd_data: dict[VisitDetector, list[int]] = {}
+    for vd, chunks in VisitDetector.from_file(visit_detector):
+        # Do not delete DiaSources from earliest chunk.
+        vd_data[vd] = sorted(chunks)[1:]
+    _LOG.info("Loaded %d visit-detectors", len(vd_data))
+
+    _find_sources(apdb_config, vd_data)
+
+
+def sources_to_keep(apdb_config: str, visit_detector: str) -> None:
+    """Find DiaSources to keep.
+
+    Parameters
+    ----------
+    apdb_config : `str`
+        APDB configuration location.
+    visit_detector : `str`
+        Path to visit-detector file produced by `find_visit_detector`.
+    """
+    vd_data: dict[VisitDetector, list[int]] = {}
+    for vd, chunks in VisitDetector.from_file(visit_detector):
+        # Do not delete DiaSources from earliest chunk.
+        vd_data[vd] = [chunks[0]]
+    _LOG.info("Loaded %d visit-detectors", len(vd_data))
+
+    _find_sources(apdb_config, vd_data)
+
+
+def _find_sources(apdb_config: str, vd_data: dict[VisitDetector, list[int]]) -> None:
+    # No need to instantiate Apdb, we can look at config.
+    apdb = Apdb.from_uri(apdb_config)
+    assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
+
+    context = apdb._context
+    assert context.has_chunk_sub_partitions, "Must have subchunks"
+
+    config = context.config
+
+    # First run query that only finds duplicated diaSourceIds.
+    table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaSource])
+
     columns = [
         "diaSourceId",
         "diaObjectId",
@@ -187,15 +370,19 @@ def find_duplicates(apdb_config: str) -> None:
         "visit",
         "detector",
     ]
-    query = Select(config.keyspace, table_name, columns)
+
+    query = Select(config.keyspace, table_name, columns, extra_clause="ALLOW FILTERING")
     query = query.where(C("apdb_replica_chunk") == 0)
     query = query.where(C("apdb_replica_subchunk") == 0)
+    query = query.where(C("visit") == 0)
+    query = query.where(C("detector") == 0)
     statement = context.stmt_factory(query, prepare=True)
 
-    queries = []
-    for chunk in chunks:
-        for subchunk in range(config.replica_sub_chunk_count):
-            queries.append((statement, (chunk.id, subchunk)))
+    queries: list[tuple] = []
+    for vd, chunks in vd_data.items():
+        for chunk in chunks:
+            for subchunk in range(config.replica_sub_chunk_count):
+                queries.append((statement, (chunk, subchunk, vd.visit, vd.detector)))
 
     results = cassandra.concurrent.execute_concurrent(
         context.session,
@@ -208,10 +395,12 @@ def find_duplicates(apdb_config: str) -> None:
     rows: list[ReplicaSourceRecord] = []
     for success, result in results:
         if success:
-            rows.extend(ReplicaSourceRecord(*row) for row in result if row[0] in duplicate_ids)
+            rows.extend(ReplicaSourceRecord(*row) for row in result)
         else:
             _LOG.error("error returned by query: %s", result)
             raise result
+
+    _LOG.info("Found %d DiaSources", len(rows))
 
     # Sort it all by diaSourceId and chunk ID.
     rows.sort(key=lambda r: (r.diaSourceId, r.apdb_replica_chunk))
@@ -237,7 +426,7 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
     source_ids: set[int] = set()
     visits: set[int] = set()
     ra_decs = set()
-    for record in _read_replica_records(csv_file):
+    for record in ReplicaSourceRecord.from_csv(csv_file):
         source_ids.add(record.diaSourceId)
         ra_decs.add((record.ra, record.dec))
         visits.add(record.visit)
@@ -278,7 +467,7 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
     _LOG.info("Found %d source pixels", len(source_pixels))
 
     time_part_start = partitioner.time_partition(Time("2026-02-18T00:00:00", format="isot"))
-    time_part_end = partitioner.time_partition(Time("2026-02-28T00:00:00", format="isot"))
+    time_part_end = partitioner.time_partition(Time("2026-03-10T00:00:00", format="isot"))
     time_partitions = list(range(time_part_start, time_part_end + 1))
     _LOG.info("Time partitions %s", time_partitions)
 
@@ -327,73 +516,94 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
     writer.writerows(records)
 
 
-def analyze_file(replica_file: str, source_file: str) -> None:
-    """Analyze files produced by `find` and `find_matching_sources`.
+def find_replica_objects(csv_file: str, apdb_config: str) -> None:
+    """Find matching DiaSources in regular table.
 
     Parameters
     ----------
-    replica_file : `str`
-        Path to CSV file produced by `find`.
-    source_file : `str`
-        Path to CSV file produced by `find_matching_sources`.
+    csv_file : `str`
+        Path to CSV file produced by `sources_to_delete/keep`.
+    apdb_config : `str`
+        APDB configuration location.
     """
-    replica_records: dict[int, list[ReplicaSourceRecord]] = defaultdict(list)
-    source_records: dict[int, list[SourceRecord]] = defaultdict(list)
-    for rrecord in _read_replica_records(replica_file):
-        replica_records[rrecord.diaSourceId].append(rrecord)
-    for record in _read_source_records(source_file):
-        source_records[record.diaSourceId].append(record)
+    objects_by_chunk: dict[int, set[int]] = defaultdict(set)
+    source_ids = set()
+    object_ids = set()
+    object_chunk_ids = set()
+    sources = list(ReplicaSourceRecord.from_csv(csv_file))
+    for source in sources:
+        if source.diaObjectId is not None:
+            objects_by_chunk[source.apdb_replica_chunk].add(source.diaObjectId)
+            object_ids.add(source.diaObjectId)
+            object_chunk_ids.add((source.diaObjectId, source.apdb_replica_chunk))
+        source_ids.add(source.diaSourceId)
 
-    for src_id, id_records in replica_records.items():
-        id_records.sort(key=lambda r: r.apdb_replica_chunk)
-        if len({record.cmp_val for record in id_records}) == 1:
-            chunks = [str(record.apdb_replica_chunk) for record in id_records]
-            print(f"{src_id}: {len(id_records)} identical records, chunks: {' '.join(chunks)}")
+    _LOG.info(
+        "Loaded %d sources with %d unique IDs, %d DiaObject IDs and %d object/chunk IDs",
+        len(sources),
+        len(source_ids),
+        len(object_ids),
+        len(object_chunk_ids),
+    )
+
+    # No need to instantiate Apdb, we can look at config.
+    apdb = Apdb.from_uri(apdb_config)
+    assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
+
+    context = apdb._context
+    assert context.has_chunk_sub_partitions, "Must have subchunks"
+
+    config = context.config
+
+    # First run query that only finds duplicated diaSourceIds.
+    table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaObject])
+
+    columns = [
+        "diaObjectId",
+        "validityStartMjdTai",
+        "apdb_replica_chunk",
+        "apdb_replica_subchunk",
+        "ra",
+        "dec",
+    ]
+
+    query = Select(config.keyspace, table_name, columns)
+    query = query.where(C("apdb_replica_chunk") == 0)
+    query = query.where(C("apdb_replica_subchunk") == 0)
+    statement = context.stmt_factory(query, prepare=True)
+
+    queries: list[tuple] = []
+    for chunk in objects_by_chunk:
+        for subchunk in range(config.replica_sub_chunk_count):
+            queries.append((statement, (chunk, subchunk)))
+
+    _LOG.info("Generated %d queries", len(queries))
+
+    results = cassandra.concurrent.execute_concurrent(
+        context.session,
+        queries,
+        results_generator=True,
+        raise_on_first_error=False,
+        concurrency=config.connection_config.read_concurrency,
+        execution_profile="read_tuples",
+    )
+    rows: list[ReplicaObjectRecord] = []
+    for success, result in results:
+        if success:
+            for row in result:
+                rec = ReplicaObjectRecord(*row)
+                if rec.diaObjectId in objects_by_chunk[rec.apdb_replica_chunk]:
+                    rows.append(rec)
         else:
-            print(f"{src_id}: {len(id_records)} different records")
-            diffs = ReplicaSourceRecord.diffs(id_records)
-            for chunk, diff in diffs.items():
-                fdiff = " ".join(f"{attr}={val}" for attr, val in diff.items())
-                print(f"    chunk={chunk} {fdiff}")
+            _LOG.error("error returned by query: %s", result)
+            raise result
 
-        first_rec = id_records[0]
-        diffs = first_rec.diff2(source_records[src_id])
-        for apdb_part, diff in diffs.items():
-            fdiff = " ".join(f"{attr}={val}" for attr, val in diff.items())
-            if apdb_part == 0:
-                print(f"    replica record:    {fdiff}")
-            else:
-                print(f"    apdb_part={apdb_part} {fdiff}")
+    _LOG.info("Found %d DiaObjects", len(rows))
 
+    # Sort it all by diaObjectId and validityStartMjdTai.
+    rows.sort(key=lambda r: (r.diaObjectId, r.validityStartMjdTai))
 
-def _read_replica_records(path: str) -> Iterator[ReplicaSourceRecord]:
-    with open(path, newline="") as csv_file:
-        for row in csv.DictReader(csv_file):
-            yield ReplicaSourceRecord(
-                diaSourceId=int(row["diaSourceId"]),
-                diaObjectId=int(row["diaObjectId"]) if row["diaObjectId"] else None,
-                ssObjectId=int(row["ssObjectId"]) if row["ssObjectId"] else None,
-                apdb_replica_chunk=int(row["apdb_replica_chunk"]),
-                apdb_replica_subchunk=int(row["apdb_replica_subchunk"]),
-                ra=float(row["ra"]),
-                dec=float(row["dec"]),
-                visit=int(row["visit"]),
-                detector=int(row["detector"]),
-            )
-
-
-def _read_source_records(path: str) -> Iterator[SourceRecord]:
-    with open(path, newline="") as csv_file:
-        for row in csv.DictReader(csv_file):
-            yield SourceRecord(
-                time_part=int(row["time_part"]),
-                apdb_part=int(row["apdb_part"]),
-                diaSourceId=int(row["diaSourceId"]),
-                diaObjectId=int(row["diaObjectId"]) if row["diaObjectId"] else None,
-                ssObjectId=int(row["ssObjectId"]) if row["ssObjectId"] else None,
-                ra=float(row["ra"]),
-                dec=float(row["dec"]),
-                visit=int(row["visit"]),
-                detector=int(row["detector"]),
-                midpointMjdTai=float(row["midpointMjdTai"]),
-            )
+    # Dump everything.
+    writer = csv.writer(sys.stdout)
+    writer.writerow(columns)
+    writer.writerows(rows)

@@ -44,8 +44,11 @@ def main(args: Sequence[str] | None = None) -> None:
 
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _find_subcommand(subparsers)
+    _find_butler_subcommand(subparsers)
+    _sources_to_delete_subcommand(subparsers)
+    _sources_to_keep_subcommand(subparsers)
     _find_sources_subcommand(subparsers)
-    _analyze_subcommand(subparsers)
+    _find_replica_objects_subcommand(subparsers)
 
     parsed_args = parser.parse_args(args)
     log_cli.process_args(parsed_args)
@@ -57,21 +60,54 @@ def main(args: Sequence[str] | None = None) -> None:
 
 
 def _find_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("find", help="Find duplicate DiaSources in replica table.")
+    parser = subparsers.add_parser("find", help="Find visit/detector pairs processed multiple times.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
-    parser.set_defaults(method=cleanup_dm55633.find_duplicates)
+    parser.set_defaults(method=cleanup_dm55633.find_visit_detector)
+
+
+def _find_butler_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "find-butler", help="Find visit/detector pairs processed multiple times in Butler."
+    )
+    parser.add_argument("butler_pp", help="Butler with PP outputs.")
+    parser.add_argument("butler_daytime", help="Butler with daytime outputs.")
+    parser.add_argument(
+        "--collections-pp",
+        help="Pattern for collection names in PP butler, default: %(default)s.",
+        default="LSSTCam/prompt/output-2026-02-*/ApPipe/*",
+    )
+    parser.add_argument(
+        "--collections-daytime",
+        help="Pattern for collection names in PP butler, default: %(default)s.",
+        default="LSSTCam/prompt/output-2026-0[23]-*/daytime/2026*",
+    )
+    parser.set_defaults(method=cleanup_dm55633.find_visit_detector_butler)
+
+
+def _sources_to_delete_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("sources-to-delete", help="Find DiaSources to delete.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("visit_detector", help="Path to CSV file produced by `find`.")
+    parser.set_defaults(method=cleanup_dm55633.sources_to_delete)
+
+
+def _sources_to_keep_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("sources-to-keep", help="Find DiaSources to keep.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("visit_detector", help="Path to CSV file produced by `find`.")
+    parser.set_defaults(method=cleanup_dm55633.sources_to_keep)
 
 
 def _find_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("find-sources", help="Find matching DiaSources in regular tables.")
-    parser.add_argument("csv_file", help="Path to CSV file produced by `find`.")
+    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
     parser.add_argument("butler_config", help="Butler configuration URI.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.set_defaults(method=cleanup_dm55633.find_matching_sources)
 
 
-def _analyze_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("analyze", help="Analyze duplicates in CSV files.")
-    parser.add_argument("replica_file", help="Path to CSV file produced by `find`.")
-    parser.add_argument("source_file", help="Path to CSV file produced by `find-sources`.")
-    parser.set_defaults(method=cleanup_dm55633.analyze_file)
+def _find_replica_objects_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("find-replica-objects", help="Find matching DiaObjects in replica tables.")
+    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.set_defaults(method=cleanup_dm55633.find_replica_objects)
