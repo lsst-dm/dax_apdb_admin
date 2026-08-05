@@ -26,7 +26,7 @@ __all__ = []
 import csv
 import logging
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from typing import NamedTuple, cast
 
@@ -184,6 +184,7 @@ class ReplicaObjectRecord(NamedTuple):
     apdb_replica_subchunk: int
     ra: float
     dec: float
+    nDiaSources: int
 
     @classmethod
     def from_csv(cls, path: str) -> Iterator[ReplicaObjectRecord]:
@@ -200,6 +201,7 @@ class ReplicaObjectRecord(NamedTuple):
             apdb_replica_subchunk=int(csv_dict["apdb_replica_subchunk"]),
             ra=float(csv_dict["ra"]),
             dec=float(csv_dict["dec"]),
+            nDiaSources=int(csv_dict["nDiaSources"]),
         )
 
 
@@ -479,6 +481,7 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
         APDB configuration location.
     """
     objects_by_chunk: dict[int, set[int]] = defaultdict(set)
+    sources_by_object: dict[tuple[int, int], list[int]] = defaultdict(list)
     source_ids = set()
     object_ids = set()
     object_chunk_ids = set()
@@ -488,6 +491,7 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
             objects_by_chunk[source.apdb_replica_chunk].add(source.diaObjectId)
             object_ids.add(source.diaObjectId)
             object_chunk_ids.add((source.diaObjectId, source.apdb_replica_chunk))
+            sources_by_object[(source.diaObjectId, source.apdb_replica_chunk)].append(source.diaSourceId)
         source_ids.add(source.diaSourceId)
 
     _LOG.info(
@@ -517,6 +521,7 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
         "apdb_replica_subchunk",
         "ra",
         "dec",
+        "nDiaSources",
     ]
 
     query = Select(config.keyspace, table_name, columns)
@@ -555,7 +560,24 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
     # Sort it all by diaObjectId and validityStartMjdTai.
     rows.sort(key=lambda r: (r.diaObjectId, r.validityStartMjdTai))
 
+    # Compare number of object versions and number of sources in each chunk.
+    counts_by_chunk = Counter((r.diaObjectId, r.apdb_replica_chunk) for r in rows)
+    objects_ambiguous = set()
+    for key, object_count in counts_by_chunk.items():
+        source_count = len(sources_by_object[key])
+        if object_count != source_count:
+            objects_ambiguous.add(key)
+            _LOG.error(
+                "object and source counts are different for diaObjectId=%s and chunk=%s: %d vs %d",
+                key[0],
+                key[1],
+                object_count,
+                source_count,
+            )
+
     # Dump everything.
     writer = csv.writer(sys.stdout)
-    writer.writerow(columns)
-    writer.writerows(rows)
+    writer.writerow(columns + ["flag"])
+    for rec in rows:
+        flag = "AMB" if (rec.diaObjectId, rec.apdb_replica_chunk) in objects_ambiguous else "-"
+        writer.writerow(list(rec) + [flag])
