@@ -272,13 +272,16 @@ def sources_to_delete(apdb_config: str, visit_detector: str) -> None:
     visit_detector : `str`
         Path to visit-detector file produced by `find_visit_detector`.
     """
-    vd_data: dict[VisitDetector, list[int]] = {}
+    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
+    count = 0
     for vd, chunks in VisitDetector.from_file(visit_detector):
         # Do not delete DiaSources from earliest chunk.
-        vd_data[vd] = sorted(chunks)[1:]
-    _LOG.info("Loaded %d visit-detectors", len(vd_data))
+        for chunk in sorted(chunks)[1:]:
+            vd_by_chunk[chunk].add(vd)
+        count += 1
+    _LOG.info("Loaded %d visit-detectors", count)
 
-    _find_sources(apdb_config, vd_data)
+    _find_sources(apdb_config, vd_by_chunk)
 
 
 def sources_to_keep(apdb_config: str, visit_detector: str) -> None:
@@ -291,16 +294,18 @@ def sources_to_keep(apdb_config: str, visit_detector: str) -> None:
     visit_detector : `str`
         Path to visit-detector file produced by `find_visit_detector`.
     """
-    vd_data: dict[VisitDetector, list[int]] = {}
+    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
+    count = 0
     for vd, chunks in VisitDetector.from_file(visit_detector):
         # Do not delete DiaSources from earliest chunk.
-        vd_data[vd] = [chunks[0]]
-    _LOG.info("Loaded %d visit-detectors", len(vd_data))
+        vd_by_chunk[chunks[0]].add(vd)
+        count += 1
+    _LOG.info("Loaded %d visit-detectors", count)
 
-    _find_sources(apdb_config, vd_data)
+    _find_sources(apdb_config, vd_by_chunk)
 
 
-def _find_sources(apdb_config: str, vd_data: dict[VisitDetector, list[int]]) -> None:
+def _find_sources(apdb_config: str, vd_by_chunk: dict[int, set[VisitDetector]]) -> None:
     # No need to instantiate Apdb, we can look at config.
     apdb = Apdb.from_uri(apdb_config)
     assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
@@ -325,18 +330,15 @@ def _find_sources(apdb_config: str, vd_data: dict[VisitDetector, list[int]]) -> 
         "detector",
     ]
 
-    query = Select(config.keyspace, table_name, columns, extra_clause="ALLOW FILTERING")
+    query = Select(config.keyspace, table_name, columns)
     query = query.where(C("apdb_replica_chunk") == 0)
     query = query.where(C("apdb_replica_subchunk") == 0)
-    query = query.where(C("visit") == 0)
-    query = query.where(C("detector") == 0)
     statement = context.stmt_factory(query, prepare=True)
 
     queries: list[tuple] = []
-    for vd, chunks in vd_data.items():
-        for chunk in chunks:
-            for subchunk in range(config.replica_sub_chunk_count):
-                queries.append((statement, (chunk, subchunk, vd.visit, vd.detector)))
+    for chunk in vd_by_chunk:
+        for subchunk in range(config.replica_sub_chunk_count):
+            queries.append((statement, (chunk, subchunk)))
 
     results = cassandra.concurrent.execute_concurrent(
         context.session,
@@ -349,7 +351,11 @@ def _find_sources(apdb_config: str, vd_data: dict[VisitDetector, list[int]]) -> 
     rows: list[ReplicaSourceRecord] = []
     for success, result in results:
         if success:
-            rows.extend(ReplicaSourceRecord(*row) for row in result)
+            for row in result:
+                vd = VisitDetector(*row[-2:])
+                chunk = cast(int, row[3])
+                if vd in vd_by_chunk[chunk]:
+                    rows.append(ReplicaSourceRecord(*row))
         else:
             _LOG.error("error returned by query: %s", result)
             raise result
