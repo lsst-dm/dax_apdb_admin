@@ -48,6 +48,7 @@ def main(args: Sequence[str] | None = None) -> None:
     _sources_to_keep_subcommand(subparsers)
     _find_sources_subcommand(subparsers)
     _find_replica_objects_subcommand(subparsers)
+    _cleanup_sources_subcommand(subparsers)
 
     parsed_args = parser.parse_args(args)
     log_cli.process_args(parsed_args)
@@ -80,14 +81,28 @@ def _sources_to_keep_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _find_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("find-sources", help="Find matching DiaSources in regular tables.")
-    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
-    parser.add_argument("butler_config", help="Butler configuration URI.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("butler_config", help="Butler configuration URI.")
+    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
     parser.set_defaults(method=cleanup_dm55633.find_matching_sources)
 
 
 def _find_replica_objects_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("find-replica-objects", help="Find matching DiaObjects in replica tables.")
-    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("csv_file", help="Path to CSV file produced by `sources-to-delete/keep`.")
     parser.set_defaults(method=cleanup_dm55633.find_replica_objects)
+
+
+def _cleanup_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("cleanup-sources", help="Find matching DiaObjects in replica tables.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("sources_to_keep", help="Path to CSV file produced by `sources-to-keep`.")
+    parser.add_argument("sources_to_delete", help="Path to CSV file produced by `sources-to-delete`.")
+    parser.add_argument(
+        "--update",
+        help="Do actual updates, by default only print actions.",
+        default=False,
+        action="store_true",
+    )
+    parser.set_defaults(method=cleanup_dm55633.cleanup_sources)
