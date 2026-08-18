@@ -24,7 +24,7 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, redirect_stdout
 from typing import Any
 
@@ -36,7 +36,7 @@ class PartitionShowTestCase(unittest.TestCase):
     """A test case for 'partition show-*' CLI."""
 
     @contextmanager
-    def make_config(self, **kwargs: Any) -> Iterator[str]:
+    def make_config(self, **kwargs: Any) -> Generator[str]:
         """Make ApdbCassandra configuration.
 
         Parameters
