@@ -27,26 +27,26 @@ import csv
 import logging
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator
-from typing import Any, NamedTuple, cast
+from collections.abc import Generator, Iterable
+from typing import Any, Literal, NamedTuple, Protocol, cast
 
 import cassandra.concurrent
 from astropy.time import Time
 
-from lsst.daf.butler import Butler
 from lsst.dax.apdb import Apdb, ApdbTables
 from lsst.dax.apdb.cassandra import ApdbCassandra
 from lsst.dax.apdb.cassandra.apdbCassandraSchema import ExtraTables
-from lsst.dax.apdb.cassandra.cassandra_utils import select_concurrent
+from lsst.dax.apdb.cassandra.cassandra_utils import execute_concurrent, select_concurrent
 from lsst.dax.apdb.cassandra.queries import Column as C  # noqa: N817
-from lsst.dax.apdb.cassandra.queries import Select
-from lsst.sphgeom import Angle, UnitVector3d
+from lsst.dax.apdb.cassandra.queries import Delete, Insert, Select
 from lsst.utils.iteration import chunk_iterable
 
 _LOG = logging.getLogger(__name__)
 
 
 class VisitDetector(NamedTuple):
+    """Visit and detector tuple with a few helper methods."""
+
     visit: int
     detector: int
 
@@ -55,20 +55,78 @@ class VisitDetector(NamedTuple):
         return cls(visit=row.visit, detector=row.detector)
 
     @classmethod
-    def from_file(cls, path: str) -> Iterator[tuple[VisitDetector, tuple[int, ...]]]:
+    def from_file(cls, path: str) -> Generator[tuple[VisitDetector, tuple[int, ...]]]:
         with open(path, newline="") as file:
             for line in file:
                 words = line.strip().split()
                 yield (VisitDetector(int(words[0]), int(words[1])), tuple(sorted(int(w) for w in words[2:])))
 
     @classmethod
-    def dump(cls, vds: Iterable[tuple[VisitDetector, tuple[int, ...]]]) -> None:
+    def dump(cls, vds: Iterable[tuple[VisitDetector, Iterable[int]]]) -> None:
         for vd, vd_chunks in sorted(vds):
             fmt_chunks = " ".join(str(chunk) for chunk in sorted(vd_chunks))
             print(f"{vd.visit} {vd.detector:3d} {fmt_chunks}")
 
 
+class DiaSource(Protocol):
+    """Protocol for records in regular DiaSource table."""
+
+    apdb_part: int
+    diaSourceId: int
+    ra: float
+    dec: float
+    diaObjectId: int
+    ssObjectId: int
+    visit: int
+    detector: int
+    midpointMjdTai: float
+
+    def _asdict(self) -> dict[str, Any]: ...
+
+    @property
+    def _fields(self) -> tuple[str, ...]: ...
+
+
+class DiaSourceReplica(Protocol):
+    """Protocol for records in DiaSourceChunks table."""
+
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    diaSourceId: int
+    ra: float
+    dec: float
+    diaObjectId: int
+    ssObjectId: int
+    visit: int
+    detector: int
+    midpointMjdTai: float
+
+    def _asdict(self) -> dict[str, Any]: ...
+
+    @property
+    def _fields(self) -> tuple[str, ...]: ...
+
+
+class DiaObjectReplica(Protocol):
+    """Protocol for records in DiaObjectChunks table."""
+
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    diaObjectId: int
+    validityStartMjdTai: float
+    ra: float
+    dec: float
+    nDiaSources: int
+
+    def _asdict(self) -> dict[str, Any]: ...
+
+    @property
+    def _fields(self) -> tuple[str, ...]: ...
+
+
 class SourceRecord(NamedTuple):
+    """Subset of attributes of regular DiaSource records."""
+
     time_part: int
     apdb_part: int
     diaSourceId: int
@@ -81,7 +139,16 @@ class SourceRecord(NamedTuple):
     midpointMjdTai: float
 
     @classmethod
-    def from_row(cls, time_part: int, row: Any) -> ReplicaSourceRecord:
+    def from_row(cls, time_part: int, row: DiaSource) -> SourceRecord:
+        """Make SourceRecord from database-originated row.
+
+        Parameters
+        ----------
+        time_part : `int`
+            Time partition.
+        row : `DiaSource`
+            NamedTuple returned from database query.
+        """
         return cls(
             time_part=time_part,
             apdb_part=row.apdb_part,
@@ -96,7 +163,7 @@ class SourceRecord(NamedTuple):
         )
 
     @classmethod
-    def from_csv(cls, path: str) -> Iterator[SourceRecord]:
+    def from_csv(cls, path: str) -> Generator[SourceRecord]:
         with open(path, newline="") as csv_file:
             for row in csv.DictReader(csv_file):
                 yield cls.from_csv_dict(row)
@@ -122,22 +189,10 @@ class SourceRecord(NamedTuple):
         writer.writerow(cls._fields)
         writer.writerows(records)
 
-    @property
-    def cmp_val(self) -> tuple:
-        return (
-            self.apdb_part,
-            self.diaSourceId,
-            self.diaObjectId,
-            self.ssObjectId,
-            self.ra,
-            self.dec,
-            self.visit,
-            self.detector,
-            self.midpointMjdTai,
-        )
-
 
 class ReplicaSourceRecord(NamedTuple):
+    """Subset of attributes of replica DiaSource records."""
+
     diaSourceId: int
     diaObjectId: int | None
     ssObjectId: int | None
@@ -149,7 +204,7 @@ class ReplicaSourceRecord(NamedTuple):
     detector: int
 
     @classmethod
-    def from_row(cls, row: Any) -> ReplicaSourceRecord:
+    def from_row(cls, row: DiaSourceReplica) -> ReplicaSourceRecord:
         return cls(
             diaSourceId=row.diaSourceId,
             diaObjectId=row.diaObjectId,
@@ -163,7 +218,7 @@ class ReplicaSourceRecord(NamedTuple):
         )
 
     @classmethod
-    def from_csv(cls, path: str) -> Iterator[ReplicaSourceRecord]:
+    def from_csv(cls, path: str) -> Generator[ReplicaSourceRecord]:
         with open(path, newline="") as csv_file:
             for row in csv.DictReader(csv_file):
                 yield cls.from_csv_dict(row)
@@ -188,47 +243,10 @@ class ReplicaSourceRecord(NamedTuple):
         writer.writerow(cls._fields)
         writer.writerows(records)
 
-    @property
-    def cmp_val(self) -> tuple:
-        return (
-            self.diaSourceId,
-            self.diaObjectId,
-            self.ssObjectId,
-            self.ra,
-            self.dec,
-            self.visit,
-            self.detector,
-        )
-
-    @staticmethod
-    def diffs(records: list[ReplicaSourceRecord]) -> dict[int, dict]:
-        records = sorted(records, key=lambda r: r.apdb_replica_chunk)
-        result: dict[int, dict] = defaultdict(dict)
-        for attr in ("diaSourceId", "diaObjectId", "ssObjectId", "ra", "dec", "visit", "detector"):
-            if len({getattr(record, attr) for record in records}) > 1:
-                for record in records:
-                    result[record.apdb_replica_chunk][attr] = getattr(record, attr)
-        return result
-
-    def diff2(self, records: list[SourceRecord]) -> dict[int, dict]:
-        all_records = [self] + sorted(records, key=lambda r: r.midpointMjdTai)
-        result: dict[int, dict] = defaultdict(dict)
-        for attr in (
-            "diaSourceId",
-            "diaObjectId",
-            "ssObjectId",
-            "ra",
-            "dec",
-            "visit",
-            "detector",
-        ):
-            if len({getattr(record, attr, None) for record in all_records}) > 1:
-                for record in all_records:
-                    result[getattr(record, "apdb_part", 0)][attr] = getattr(record, attr)
-        return result
-
 
 class ReplicaObjectRecord(NamedTuple):
+    """Subset of attributes of replica DiaObject records."""
+
     diaObjectId: int
     validityStartMjdTai: float
     apdb_replica_chunk: int
@@ -238,7 +256,19 @@ class ReplicaObjectRecord(NamedTuple):
     nDiaSources: int
 
     @classmethod
-    def from_csv(cls, path: str) -> Iterator[ReplicaObjectRecord]:
+    def from_row(cls, row: DiaObjectReplica) -> ReplicaObjectRecord:
+        return cls(
+            diaObjectId=row.diaObjectId,
+            validityStartMjdTai=row.validityStartMjdTai,
+            apdb_replica_chunk=row.apdb_replica_chunk,
+            apdb_replica_subchunk=row.apdb_replica_subchunk,
+            ra=row.ra,
+            dec=row.dec,
+            nDiaSources=row.nDiaSources,
+        )
+
+    @classmethod
+    def from_csv(cls, path: str) -> Generator[ReplicaObjectRecord]:
         with open(path, newline="") as csv_file:
             for row in csv.DictReader(csv_file):
                 yield cls.from_csv_dict(row)
@@ -278,7 +308,6 @@ def find_visit_detector(apdb_config: str) -> None:
 
     config = context.config
 
-    # First run query that only finds duplicated diaSourceIds.
     table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaSource])
 
     query = Select(config.keyspace, table_name, ["visit", "detector", "apdb_replica_chunk"])
@@ -322,19 +351,7 @@ def sources_to_delete(apdb_config: str, visit_detector: str) -> None:
     visit_detector : `str`
         Path to visit-detector file produced by `find_visit_detector`.
     """
-    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
-    count = 0
-    for vd, chunks in VisitDetector.from_file(visit_detector):
-        # Do not delete DiaSources from earliest chunk.
-        for chunk in sorted(chunks)[1:]:
-            vd_by_chunk[chunk].add(vd)
-        count += 1
-    _LOG.info("Loaded %d visit-detectors", count)
-
-    apdb = Apdb.from_uri(apdb_config)
-    assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
-
-    rows = _find_sources(apdb, vd_by_chunk)
+    rows = _sources_to_keep_or_drop(apdb_config, visit_detector, "drop")
 
     # Dump everything.
     ReplicaSourceRecord.to_csv(rows)
@@ -350,30 +367,35 @@ def sources_to_keep(apdb_config: str, visit_detector: str) -> None:
     visit_detector : `str`
         Path to visit-detector file produced by `find_visit_detector`.
     """
-    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
-    count = 0
-    for vd, chunks in VisitDetector.from_file(visit_detector):
-        # Do not delete DiaSources from earliest chunk.
-        vd_by_chunk[chunks[0]].add(vd)
-        count += 1
-    _LOG.info("Loaded %d visit-detectors", count)
-
-    apdb = Apdb.from_uri(apdb_config)
-    assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
-
-    rows = _find_sources(apdb, vd_by_chunk)
+    rows = _sources_to_keep_or_drop(apdb_config, visit_detector, "keep")
 
     # Dump everything.
     ReplicaSourceRecord.to_csv(rows)
 
 
-def _find_sources(
-    apdb: ApdbCassandra, vd_by_chunk: dict[int, set[VisitDetector]]
+def _sources_to_keep_or_drop(
+    apdb_config: str, visit_detector: str, action: Literal["keep", "drop"]
 ) -> list[ReplicaSourceRecord]:
+    apdb = Apdb.from_uri(apdb_config)
+    assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
+
     context = apdb._context
     assert context.has_chunk_sub_partitions, "Must have subchunks"
 
     config = context.config
+
+    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
+    count = 0
+    for vd, chunks in VisitDetector.from_file(visit_detector):
+        # Earliest chunk is the one to keep.
+        if action == "keep":
+            vd_by_chunk[sorted(chunks)[0]].add(vd)
+        else:
+            for chunk in sorted(chunks)[1:]:
+                vd_by_chunk[chunk].add(vd)
+        count += 1
+
+    _LOG.info("Loaded %d visit-detectors", count)
 
     # First run query that only finds duplicated diaSourceIds.
     table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaSource])
@@ -427,17 +449,15 @@ def _find_sources(
     return rows
 
 
-def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -> None:
+def find_regular_sources(apdb_config: str, csv_file: str) -> None:
     """Find matching DiaSources in regular table.
 
     Parameters
     ----------
-    csv_file : `str`
-        Path to CSV file produced by `find`.
-    butler_config : `str`
-        Butler configuration location.
     apdb_config : `str`
         APDB configuration location.
+    csv_file : `str`
+        Path to CSV file produced by ``sources_to_keep/delete``.
     """
     source_ids: set[int] = set()
     visits: set[int] = set()
@@ -449,38 +469,15 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
     _LOG.info("Found %d source IDs", len(source_ids))
     _LOG.info("Found %d visits", len(visits))
 
-    butler = Butler.from_config(butler_config)
-    instrument = "LSSTCam"
-    visit_regions: list = []
-    for visits_chunk in chunk_iterable(visits, 20):
-        visit_records = butler.query_dimension_records(
-            "visit",
-            instrument=instrument,
-            where="visit IN (:visits)",
-            bind={"visits": visits_chunk},
-        )
-        assert len(visit_records) == len(visits_chunk)
-        visit_regions.extend(vr.region for vr in visit_records)
-
-    _LOG.info("Found %d regions", len(visit_regions))
-
     # No need to instantiate Apdb, we can look at config.
     apdb = Apdb.from_uri(apdb_config)
     assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
-
-    # Find all spatial partitions.
     context = apdb._context
     partitioner = context.partitioner
-    region_pixels = set()
-    for region in visit_regions:
-        region_pixels.update(partitioner.pixelization.pixels(region))
-    _LOG.info("Found %d regions pixels", len(region_pixels))
 
-    source_pixels = set()
-    for ra, dec in ra_decs:
-        direction = UnitVector3d(Angle.fromDegrees(ra), Angle.fromDegrees(dec))
-        source_pixels.add(partitioner.pixelization.pixel(direction))
-    _LOG.info("Found %d source pixels", len(source_pixels))
+    # Find all spatial partitions.
+    pixels = {partitioner.pixel(ra, dec) for ra, dec in ra_decs}
+    _LOG.info("Found %d source pixels", len(pixels))
 
     time_part_start = partitioner.time_partition(Time("2026-02-18T00:00:00", format="isot"))
     time_part_end = partitioner.time_partition(Time("2026-03-10T00:00:00", format="isot"))
@@ -505,7 +502,7 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
         statement = context.stmt_factory(
             Select(context.config.keyspace, table_name, columns).where(C("apdb_part") == 0), prepare=True
         )
-        queries = [(statement, (pixel,)) for pixel in source_pixels]
+        queries = [(statement, (pixel,)) for pixel in pixels]
 
         results = cassandra.concurrent.execute_concurrent(
             context.session,
@@ -526,7 +523,7 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
                 _LOG.error("error returned by query: %s", result)
                 raise result
 
-    records = sorted(records, key=lambda r: (r.diaSourceId, r.midpointMjdTai))
+    records = sorted(records, key=lambda r: (r.diaSourceId, r.midpointMjdTai, r.apdb_part))
     record_ids = {record.diaSourceId for record in records}
     _LOG.info("Found %d DiaSource records from %d unique sources", len(records), len(record_ids))
 
@@ -534,15 +531,15 @@ def find_matching_sources(csv_file: str, butler_config: str, apdb_config: str) -
     SourceRecord.to_csv(records)
 
 
-def find_replica_objects(csv_file: str, apdb_config: str) -> None:
+def find_replica_objects(apdb_config: str, csv_file: str) -> None:
     """Find matching DiaObjects in replica table.
 
     Parameters
     ----------
-    csv_file : `str`
-        Path to CSV file produced by `sources_to_delete/keep`.
     apdb_config : `str`
         APDB configuration location.
+    csv_file : `str`
+        Path to CSV file produced by `sources_to_delete/keep`.
     """
     objects_by_chunk: dict[int, set[int]] = defaultdict(set)
     sources_by_object: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -588,9 +585,11 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
         "nDiaSources",
     ]
 
-    query = Select(config.keyspace, table_name, columns)
-    query = query.where(C("apdb_replica_chunk") == 0)
-    query = query.where(C("apdb_replica_subchunk") == 0)
+    query = (
+        Select(config.keyspace, table_name, columns)
+        .where(C("apdb_replica_chunk") == 0)
+        .where(C("apdb_replica_subchunk") == 0)
+    )
     statement = context.stmt_factory(query, prepare=True)
 
     queries: list[tuple] = []
@@ -606,13 +605,13 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
         results_generator=True,
         raise_on_first_error=False,
         concurrency=config.connection_config.read_concurrency,
-        execution_profile="read_tuples",
+        execution_profile="read_named_tuples",
     )
     rows: list[ReplicaObjectRecord] = []
     for success, result in results:
         if success:
             for row in result:
-                rec = ReplicaObjectRecord(*row)
+                rec = ReplicaObjectRecord.from_row(row)
                 if rec.diaObjectId in objects_by_chunk[rec.apdb_replica_chunk]:
                     rows.append(rec)
         else:
@@ -647,70 +646,237 @@ def find_replica_objects(csv_file: str, apdb_config: str) -> None:
         writer.writerow(list(rec) + [flag])
 
 
-def cleanup_sources(apdb_config: str, sources_to_keep: str, sources_to_delete: str, update: bool) -> None:
-    """Do cleanup of DiaSources.
+def cleanup_sources(apdb_config: str, visit_detector: str, update: bool) -> None:
+    """Do cleanup of DiaSources in both regular and replica tables.
 
     Parameters
     ----------
     apdb_config : `str`
         APDB configuration location.
-    sources_to_keep : `str`
-        CSV file produced by `sources_to_keep`.
-    sources_to_delete : `str`
-        CSV file produced by `sources_to_delete`.
+    visit_detector : `str`
+        File produced by `find_visit_detector`.
     update : `bool`
         When True do actual updates, by default only print actions.
+
+    Notes
+    -----
+    This method uses the list of visits/detectors as an input. The sequence
+    of actions:
+
+        - Find DiaSources to keep or drop in replica table.
+        - Find matching DiaSources in regular table.
+        - Drop and re-create DiaSources in regular table.
+        - Drop DiaSources in replica table.
+
+    After this only the DiaSources from the first processing of a particular
+    visit/detector will remain in the database.
     """
     apdb = Apdb.from_uri(apdb_config)
     assert isinstance(apdb, ApdbCassandra), "Expecting Cassandra APDB"
 
-    to_keep = list(ReplicaSourceRecord.from_csv(sources_to_keep))
-    to_delete = list(ReplicaSourceRecord.from_csv(sources_to_delete))
-    _check_sources(apdb, to_keep, to_delete)
+    # Get DiaSources to keep and drop from replica table.
+    to_keep, to_drop = _find_replica_sources(apdb, visit_detector)
 
-    _drop_replica_sources(apdb, to_delete, update)
+    # Drop/re-create DiaSources in regular table.
+    _recreate_regular_sources(apdb, to_keep, to_drop, update)
+
+    # Drop duplicated processing from replica table.
+    _drop_replica_sources(apdb, to_drop, update)
 
 
-def _check_sources(
-    apdb: ApdbCassandra, to_keep: list[ReplicaSourceRecord], to_delete: list[ReplicaSourceRecord]
+def _find_replica_sources(
+    apdb: ApdbCassandra, visit_detector: str
+) -> tuple[list[DiaSourceReplica], list[DiaSourceReplica]]:
+    """Find full DiaSource records from replica table to keep and drop.
+
+    Parameters
+    ----------
+    apdb : `ApdbCassandra`
+        APDB instance.
+    visit_detector : `str`
+        Loaction of the file name with visit/detector info.
+    """
+    all_chunks: set[int] = set()
+    chunks_to_keep: dict[VisitDetector, int] = {}
+    chunks_to_drop: dict[VisitDetector, list[int]] = {}
+    count = 0
+    for vd, chunks in VisitDetector.from_file(visit_detector):
+        # Keep DiaSources from earliest chunk, sort chunks for easy check.
+        all_chunks.update(chunks)
+        sorted_chunks = sorted(chunks)
+        chunks_to_keep[vd] = sorted_chunks[0]
+        chunks_to_drop[vd] = sorted_chunks[1:]
+        count += 1
+    _LOG.info("Loaded %d visit-detectors", count)
+
+    context = apdb._context
+    assert context.has_chunk_sub_partitions, "Must have subchunks"
+
+    config = context.config
+
+    # First run query that only finds duplicated diaSourceIds.
+    table_name = context.schema.tableName(ExtraTables.replica_chunk_tables(True)[ApdbTables.DiaSource])
+
+    query = Select(config.keyspace, table_name, ["*"])
+    query = query.where(C("apdb_replica_chunk") == 0)
+    query = query.where(C("apdb_replica_subchunk") == 0)
+    statement = context.stmt_factory(query, prepare=True)
+
+    queries: list[tuple] = []
+    for chunk in all_chunks:
+        for subchunk in range(config.replica_sub_chunk_count):
+            queries.append((statement, (chunk, subchunk)))
+
+    results = cassandra.concurrent.execute_concurrent(
+        context.session,
+        queries,
+        results_generator=True,
+        raise_on_first_error=False,
+        concurrency=config.connection_config.read_concurrency,
+        execution_profile="read_named_tuples",
+    )
+    to_keep: list[DiaSourceReplica] = []
+    to_drop: list[DiaSourceReplica] = []
+    counts_to_keep: Counter = Counter()
+    counts_to_drop: Counter = Counter()
+    for success, result in results:
+        if success:
+            for row in result:
+                vd = VisitDetector.from_row(row)
+                if vd in chunks_to_keep:
+                    chunk = cast(int, row.apdb_replica_chunk)
+                    if chunk == chunks_to_keep[vd]:
+                        to_keep.append(row)
+                        counts_to_keep[vd] += 1
+                    elif chunk in chunks_to_drop[vd]:
+                        to_drop.append(row)
+                        counts_to_drop[vd] += 1
+        else:
+            _LOG.error("error returned by query: %s", result)
+            raise result
+
+    _LOG.info(
+        "Found %d DiaSources to keep (%d unique IDs) and %d to drop (%d unique IDs)",
+        len(to_keep),
+        len({record.diaSourceId for record in to_keep}),
+        len(to_drop),
+        len({record.diaSourceId for record in to_drop}),
+    )
+
+    def _chunk_to_time(chunk: int) -> str:
+        t = Time(chunk, format="unix_tai")
+        return str(t.isot)
+
+    if _LOG.isEnabledFor(logging.DEBUG):
+        for vd in sorted(counts_to_keep):
+            n_to_keep = counts_to_keep[vd]
+            n_to_drop = counts_to_drop[vd]
+            ch_to_drop = [_chunk_to_time(ch) for ch in chunks_to_drop[vd]]
+            flag = ""
+            if n_to_keep < n_to_drop:
+                flag = " <"
+            elif n_to_keep > n_to_drop:
+                flag = " >"
+            _LOG.debug(f"{vd[0]} {vd[1]:3d} {ch_to_drop} {n_to_keep:4d} {n_to_drop:4d}{flag}")
+
+    overlap = set(to_keep) & set(to_drop)
+    _LOG.info("Number of overlapping records: %d", len(overlap))
+
+    return to_keep, to_drop
+
+
+def _recreate_regular_sources(
+    apdb: ApdbCassandra, to_keep: list[DiaSourceReplica], to_drop: list[DiaSourceReplica], update: bool
 ) -> None:
-    # Check that sources in `to_keep` are older than in `to_delete`.
-    vd_chunks_keep: dict[VisitDetector, int] = {}
-    for source in to_keep:
-        vd = VisitDetector(source.visit, source.detector)
-        chunk = source.apdb_replica_chunk
-        old_chunk = vd_chunks_keep.setdefault(vd, chunk)
-        if old_chunk != chunk:
-            raise TypeError("More than one chunk for the same visit-detector: %s", vd)
+    """Recreate records in the regular DiaSource tables.
 
-    vd_chunks_delete: dict[VisitDetector, set[int]] = defaultdict(set)
-    for source in to_delete:
-        vd = VisitDetector(source.visit, source.detector)
-        chunk = source.apdb_replica_chunk
-        vd_chunks_delete[vd].add(chunk)
+    Parameters
+    ----------
+    apdb
+        Cassandra APDB instance.
+    to_keep
+        List of records from replica tables that we have to keep - these
+        records were created on the initial processing (in PP).
+    to_drop
+        List of records from replica tables that we have to drop - these
+        records were created by daytime re-processing.
+    update
+        If `False` then skip actual updates.
+    """
+    # After the call to this method:
+    #  - all records matching `to_drop` records should be dropped,
+    #  - deleted or changed records in `to_keep` must be recreated.
+    #
+    # "Matching" in this case means matching ``diaObjectId`` because it is the
+    # unique identifier in the logical model. Actual schema cannot guarantee
+    # its uniqueness because we partition DiaSources both temporally and
+    # spatially. We need to look for matching diaSourceIds in all partitions.
+    #
+    # Most straightforward way to do this is to drop all records in all
+    # partitions that match ``diaObjectId`` in any of the two lists and then
+    # re-create all records in ``to_keep`` list. But it could create too many
+    # tombstones which is not ideal. Instead we use a different approach:
+    #  - find all records in all partitions that match ``diaSourceId`` in
+    #    any of the two lists.
+    #  - for each ``daSourceId``:
+    #    - drop records that do not match a record in ``to_keep``
+    #    - if there are no records that match a record in ``to_keep`` then
+    #      recreate thar record from ``to_keep``
 
-    if set(vd_chunks_keep) != set(vd_chunks_delete):
-        raise TypeError("Number of visit/detectors is different.")
+    _LOG.info("Searching for matching sources to keep")
+    matches_to_keep = _find_regular_sources(apdb, to_keep)
+    _LOG.info("Searching for matching sources to drop")
+    matches_to_drop = _find_regular_sources(apdb, to_drop)
 
-    for vd, chunks_delete in vd_chunks_delete.items():
-        chunk_keep = vd_chunks_keep[vd]
-        if min(chunks_delete) <= chunk_keep:
-            raise TypeError("Deleted chunks are older.")
+    _LOG.info("Number of overlapping records: %d", len(set(matches_to_keep) & set(matches_to_drop)))
 
-    # Check that all data is still in the replica tables.
-    vd_by_chunk: dict[int, set[VisitDetector]] = defaultdict(set)
-    for source in to_keep + to_delete:
-        vd_by_chunk[source.apdb_replica_chunk].add(VisitDetector(source.visit, source.detector))
+    ids_to_keep = {record.diaSourceId: record for record in to_keep}
+    assert len(ids_to_keep) == len(to_keep), "All to_keep IDs must be unique"
 
-    all_sources = set(_find_sources(apdb, vd_by_chunk))
-    for source in to_keep + to_delete:
-        if source not in all_sources:
-            raise TypeError("Source %s is not in the replica table.")
+    # ids_to_drop: dict[int, list[DiaSourceReplica]] = defaultdict(list)
+    # for record in to_drop:
+    #     ids_to_drop[record.diaSourceId].append(record)
 
-    _LOG.info("Source data check is successful.")
+    all_matches = set(matches_to_keep) | set(matches_to_drop)
+    will_keep = []
+    will_drop = []
+    for record in all_matches:
+        if (match := ids_to_keep.get(record.diaSourceId)) and _same_record(record, match):
+            # We are going to keep this one, but remove it from ids_to_keep
+            # so that we know which records we have to recreate.
+            will_keep.append(record)
+            del ids_to_keep[record.diaSourceId]
+        else:
+            will_drop.append(record)
+
+    _LOG.info(
+        "Will keep %d records, drop %d records, and re-create %d records",
+        len(will_keep),
+        len(will_drop),
+        len(ids_to_keep),
+    )
+
+    # Records in ``will_drop`` have to be deleted.
+    _drop_regular_records(apdb, will_drop, update)
+
+    # Whatever is left in ids_to_keep will need to be re-created.
+    _insert_regular_records(apdb, ids_to_keep.values(), update)
 
 
-def _drop_replica_sources(apdb: ApdbCassandra, to_drop: list[ReplicaSourceRecord], update: bool) -> None:
+def _same_record(regular_record: DiaSource, replica_record: DiaSourceReplica) -> bool:
+    # Compare two records ignoring difference in partitioning columns.
+
+    regular_dict = regular_record._asdict()
+    del regular_dict["apdb_part"]
+    replica_dict = replica_record._asdict()
+    del replica_dict["apdb_replica_chunk"]
+    del replica_dict["apdb_replica_subchunk"]
+    return regular_dict == replica_dict
+
+
+def _drop_replica_sources(apdb: ApdbCassandra, to_drop: list[DiaSourceReplica], update: bool) -> None:
+    # Delete records from DiaSource replica table.
+
     _LOG.info("Will drop %d sources from replica table", len(to_drop))
 
     sources_by_chunk: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -743,20 +909,172 @@ def _drop_replica_sources(apdb: ApdbCassandra, to_drop: list[ReplicaSourceRecord
         execution_profile="read_tuples",
     )
 
-    counts = {}
+    db_counts = {}
     for success, result in results:
         if success:
             for chunk, subchunk, count in result:
-                counts[(chunk, subchunk)] = count
+                db_counts[(chunk, subchunk)] = count
         else:
             _LOG.error("error returned by query: %s", result)
             raise result
 
-    for (chunk, subchunk), sources in sources_by_chunk.items():
-        if len(sources) == counts[(chunk, subchunk)]:
-            _LOG.info("Will drop whole chunk/subchunk %d/%d", chunk, subchunk)
-        else:
-            _LOG.info("Will drop %d sources for chunk/subchunk %d/%d", len(sources), chunk, subchunk)
+    query = (
+        Delete(config.keyspace, table_name)
+        .where(C("apdb_replica_chunk") == 0)
+        .where(C("apdb_replica_subchunk") == 0)
+    )
+    drop_subchunk = context.stmt_factory(query, prepare=True)
+    query = query.where(C("diaSourceId") == 0)
+    drop_record = context.stmt_factory(query, prepare=True)
 
-    if not update:
+    queries: list[tuple[Delete, tuple]] = []
+    for (chunk, subchunk), sources in sources_by_chunk.items():
+        if len(sources) == db_counts[(chunk, subchunk)]:
+            _LOG.debug("Will drop whole chunk/subchunk %d/%d", chunk, subchunk)
+            queries.append((drop_subchunk, (chunk, subchunk)))
+        else:
+            _LOG.debug("Will drop %d sources for chunk/subchunk %d/%d", len(sources), chunk, subchunk)
+            queries.extend((drop_record, (chunk, subchunk, diaSourceId)) for diaSourceId in sources)
+
+    if update:
+        for query_chunk in chunk_iterable(queries, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Executed %d DELETE queries", len(queries))
+    else:
+        _LOG.info("Would have executed %d DELETE queries", len(queries))
+
+
+def _insert_regular_records(apdb: ApdbCassandra, records: Iterable[DiaSourceReplica], update: bool) -> None:
+    # Use replica DiaSources to recreate regular DiaSources.
+
+    context = apdb._context
+    partitioner = context.partitioner
+
+    # We need to iterate more than once.
+    record_list = list(records)
+    if not record_list:
         return
+
+    # Get the list of regular columns in the DiaSource.
+    columns = list(record_list[0]._fields)
+    columns.remove("apdb_replica_chunk")
+    columns.remove("apdb_replica_subchunk")
+
+    time_partitions = {
+        partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
+        for record in records
+    }
+
+    statements = {}
+    for time_partition in time_partitions:
+        table_name = context.schema.tableName(ApdbTables.DiaSource, time_partition)
+        query = Insert(context.config.keyspace, table_name, ["apdb_part"] + columns)
+        statements[time_partition] = context.stmt_factory(query, prepare=True)
+
+    queries = []
+    for record in records:
+        time_partition = partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
+        apdb_part = partitioner.pixel(record.ra, record.dec)
+        values = [apdb_part] + [getattr(record, column) for column in columns]
+        queries.append((statements[time_partition], values))
+
+    if update:
+        for query_chunk in chunk_iterable(queries, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Inserted %d records", len(queries))
+    else:
+        _LOG.info("Would have inserted %d records", len(queries))
+
+
+def _drop_regular_records(apdb: ApdbCassandra, records: list[DiaSource], update: bool) -> None:
+    context = apdb._context
+    partitioner = context.partitioner
+
+    # All affected tables
+    time_partitions = {
+        partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
+        for record in records
+    }
+    _LOG.info("Will delete records in time partitions %s", time_partitions)
+
+    statements = {}
+    for time_partition in time_partitions:
+        table_name = context.schema.tableName(ApdbTables.DiaSource, time_partition)
+        query = (
+            Delete(context.config.keyspace, table_name)
+            .where(C("apdb_part") == 0)
+            .where(C("diaSourceId") == 0)
+        )
+        statements[time_partition] = context.stmt_factory(query, prepare=True)
+
+    queries = []
+    for record in records:
+        time_partition = partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
+        queries.append((statements[time_partition], (record.apdb_part, record.diaSourceId)))
+
+    if update:
+        for query_chunk in chunk_iterable(queries, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Dropped %d records", len(queries))
+    else:
+        _LOG.info("Would have dropped %d records", len(queries))
+
+
+def _find_regular_sources(apdb: ApdbCassandra, sources: list[DiaSourceReplica]) -> list[DiaSource]:
+    # Find matching DiaSources in regular table.
+    source_ids: set[int] = set()
+    visits: set[int] = set()
+    ra_decs = set()
+    midpoint_min = 100_000.0
+    midpoint_max = 0.0
+    for record in sources:
+        source_ids.add(record.diaSourceId)
+        ra_decs.add((record.ra, record.dec))
+        visits.add(record.visit)
+        if record.midpointMjdTai < midpoint_min:
+            midpoint_min = record.midpointMjdTai
+        if record.midpointMjdTai > midpoint_max:
+            midpoint_max = record.midpointMjdTai
+    _LOG.info("Found %d source IDs", len(source_ids))
+    _LOG.info("Found %d visits", len(visits))
+
+    context = apdb._context
+    partitioner = context.partitioner
+
+    # Find all spatial partitions.
+    pixels = {partitioner.pixel(ra, dec) for ra, dec in ra_decs}
+    _LOG.info("Found %d source pixels", len(pixels))
+
+    time_part_start = partitioner.time_partition(Time(midpoint_min, format="mjd", scale="tai"))
+    time_part_end = partitioner.time_partition(Time(midpoint_max, format="mjd", scale="tai"))
+    time_partitions = list(range(time_part_start, time_part_end + 1))
+    _LOG.info("Time partitions %s", time_partitions)
+
+    records: list[DiaSource] = []
+    for time_partition in time_partitions:
+        table_name = context.schema.tableName(ApdbTables.DiaSource, time_partition)
+        statement = context.stmt_factory(
+            Select(context.config.keyspace, table_name, ["*"]).where(C("apdb_part") == 0), prepare=True
+        )
+        queries = [(statement, (pixel,)) for pixel in pixels]
+
+        results = cassandra.concurrent.execute_concurrent(
+            context.session,
+            queries,
+            results_generator=True,
+            raise_on_first_error=False,
+            concurrency=context.config.connection_config.read_concurrency,
+            execution_profile="read_named_tuples",
+        )
+        for success, result in results:
+            if success:
+                records.extend(row for row in result if row.diaSourceId in source_ids)
+            else:
+                _LOG.error("error returned by query: %s", result)
+                raise result
+
+    records = sorted(records, key=lambda r: (r.diaSourceId, r.midpointMjdTai, r.apdb_part))
+    record_ids = {record.diaSourceId for record in records}
+    _LOG.info("Found %d DiaSource records from %d unique sources", len(records), len(record_ids))
+
+    return records
