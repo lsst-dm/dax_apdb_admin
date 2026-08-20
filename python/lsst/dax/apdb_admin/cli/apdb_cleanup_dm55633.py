@@ -98,7 +98,10 @@ def _find_replica_objects_subcommand(subparsers: argparse._SubParsersAction) -> 
 def _cleanup_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("cleanup-sources", help="Find matching DiaObjects in replica tables.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
-    parser.add_argument("visit_detector", help="Path to a file produced by `find`.")
+    parser.add_argument("visit_detector", help="Path to a file produced by `find-visit-detector`.")
+    parser.add_argument(
+        "output_archive", help="Name of a new ZIP file to keep CSV files with deleted/replaced records."
+    )
     parser.add_argument(
         "--update",
         help="Do actual updates, by default only print actions.",

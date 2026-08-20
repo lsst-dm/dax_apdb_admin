@@ -24,11 +24,13 @@ from __future__ import annotations
 __all__ = []
 
 import csv
+import io
 import logging
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Generator, Iterable
 from typing import Any, Literal, NamedTuple, Protocol, cast
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import cassandra.concurrent
 from astropy.time import Time
@@ -646,7 +648,7 @@ def find_replica_objects(apdb_config: str, csv_file: str) -> None:
         writer.writerow(list(rec) + [flag])
 
 
-def cleanup_sources(apdb_config: str, visit_detector: str, update: bool) -> None:
+def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, update: bool) -> None:
     """Do cleanup of DiaSources in both regular and replica tables.
 
     Parameters
@@ -655,6 +657,9 @@ def cleanup_sources(apdb_config: str, visit_detector: str, update: bool) -> None
         APDB configuration location.
     visit_detector : `str`
         File produced by `find_visit_detector`.
+    output_archive : `str`
+        Name of the ZIP file to store CSV files with records that are deleted
+        or inserted.
     update : `bool`
         When True do actual updates, by default only print actions.
 
@@ -677,11 +682,13 @@ def cleanup_sources(apdb_config: str, visit_detector: str, update: bool) -> None
     # Get DiaSources to keep and drop from replica table.
     to_keep, to_drop = _find_replica_sources(apdb, visit_detector)
 
+    archive = ZipFile(output_archive, "x", ZIP_DEFLATED, compresslevel=9)
+
     # Drop/re-create DiaSources in regular table.
-    _recreate_regular_sources(apdb, to_keep, to_drop, update)
+    _recreate_regular_sources(apdb, to_keep, to_drop, archive, update)
 
     # Drop duplicated processing from replica table.
-    _drop_replica_sources(apdb, to_drop, update)
+    _drop_replica_sources(apdb, to_drop, archive, update)
 
 
 def _find_replica_sources(
@@ -786,7 +793,11 @@ def _find_replica_sources(
 
 
 def _recreate_regular_sources(
-    apdb: ApdbCassandra, to_keep: list[DiaSourceReplica], to_drop: list[DiaSourceReplica], update: bool
+    apdb: ApdbCassandra,
+    to_keep: list[DiaSourceReplica],
+    to_drop: list[DiaSourceReplica],
+    archive: ZipFile,
+    update: bool,
 ) -> None:
     """Recreate records in the regular DiaSource tables.
 
@@ -800,6 +811,8 @@ def _recreate_regular_sources(
     to_drop
         List of records from replica tables that we have to drop - these
         records were created by daytime re-processing.
+    archive
+        `ZipFile` where to store CSV files with deleted or inserted records.
     update
         If `False` then skip actual updates.
     """
@@ -857,10 +870,10 @@ def _recreate_regular_sources(
     )
 
     # Records in ``will_drop`` have to be deleted.
-    _drop_regular_records(apdb, will_drop, update)
+    _drop_regular_records(apdb, will_drop, archive, update)
 
     # Whatever is left in ids_to_keep will need to be re-created.
-    _insert_regular_records(apdb, ids_to_keep.values(), update)
+    _insert_regular_records(apdb, ids_to_keep.values(), archive, update)
 
 
 def _same_record(regular_record: DiaSource, replica_record: DiaSourceReplica) -> bool:
@@ -874,7 +887,9 @@ def _same_record(regular_record: DiaSource, replica_record: DiaSourceReplica) ->
     return regular_dict == replica_dict
 
 
-def _drop_replica_sources(apdb: ApdbCassandra, to_drop: list[DiaSourceReplica], update: bool) -> None:
+def _drop_replica_sources(
+    apdb: ApdbCassandra, to_drop: list[DiaSourceReplica], archive: ZipFile, update: bool
+) -> None:
     # Delete records from DiaSource replica table.
 
     _LOG.info("Will drop %d sources from replica table", len(to_drop))
@@ -943,8 +958,17 @@ def _drop_replica_sources(apdb: ApdbCassandra, to_drop: list[DiaSourceReplica], 
     else:
         _LOG.info("Would have executed %d DELETE queries", len(queries))
 
+    # Dump records that were deleted to CSV file.
+    with archive.open("dropped-replica-records.csv", "w") as output:
+        if to_drop:
+            writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+            writer.writerow(to_drop[0]._fields)
+            writer.writerows(to_drop)  # type: ignore[arg-type]
 
-def _insert_regular_records(apdb: ApdbCassandra, records: Iterable[DiaSourceReplica], update: bool) -> None:
+
+def _insert_regular_records(
+    apdb: ApdbCassandra, records: Iterable[DiaSourceReplica], archive: ZipFile, update: bool
+) -> None:
     # Use replica DiaSources to recreate regular DiaSources.
 
     context = apdb._context
@@ -972,11 +996,18 @@ def _insert_regular_records(apdb: ApdbCassandra, records: Iterable[DiaSourceRepl
         statements[time_partition] = context.stmt_factory(query, prepare=True)
 
     queries = []
-    for record in records:
-        time_partition = partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
-        apdb_part = partitioner.pixel(record.ra, record.dec)
-        values = [apdb_part] + [getattr(record, column) for column in columns]
-        queries.append((statements[time_partition], values))
+    with archive.open("inserted-regular-records.csv", "w") as output:
+        writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+        writer.writerow(["apdb_time_part", "apdb_part"] + columns)
+
+        for record in records:
+            time_partition = partitioner.time_partition(
+                Time(record.midpointMjdTai, format="mjd", scale="tai")
+            )
+            apdb_part = partitioner.pixel(record.ra, record.dec)
+            values = [apdb_part] + [getattr(record, column) for column in columns]
+            queries.append((statements[time_partition], values))
+            writer.writerow([time_partition] + values)
 
     if update:
         for query_chunk in chunk_iterable(queries, 1000):
@@ -986,7 +1017,9 @@ def _insert_regular_records(apdb: ApdbCassandra, records: Iterable[DiaSourceRepl
         _LOG.info("Would have inserted %d records", len(queries))
 
 
-def _drop_regular_records(apdb: ApdbCassandra, records: list[DiaSource], update: bool) -> None:
+def _drop_regular_records(
+    apdb: ApdbCassandra, records: list[DiaSource], archive: ZipFile, update: bool
+) -> None:
     context = apdb._context
     partitioner = context.partitioner
 
@@ -1008,9 +1041,17 @@ def _drop_regular_records(apdb: ApdbCassandra, records: list[DiaSource], update:
         statements[time_partition] = context.stmt_factory(query, prepare=True)
 
     queries = []
-    for record in records:
-        time_partition = partitioner.time_partition(Time(record.midpointMjdTai, format="mjd", scale="tai"))
-        queries.append((statements[time_partition], (record.apdb_part, record.diaSourceId)))
+    with archive.open("dropped-regular-records.csv", "w") as output:
+        writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+        if records:
+            writer.writerow(["apdb_time_part"] + list(records[0]._fields))
+
+        for record in records:
+            time_partition = partitioner.time_partition(
+                Time(record.midpointMjdTai, format="mjd", scale="tai")
+            )
+            queries.append((statements[time_partition], (record.apdb_part, record.diaSourceId)))
+            writer.writerow([time_partition] + list(record))  # type: ignore[call-overload]
 
     if update:
         for query_chunk in chunk_iterable(queries, 1000):
