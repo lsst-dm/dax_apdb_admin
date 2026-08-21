@@ -25,10 +25,13 @@ __all__ = []
 
 import csv
 import io
+import itertools
+import json
 import logging
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Generator, Iterable
+from operator import attrgetter
 from typing import Any, Literal, NamedTuple, Protocol, cast
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -285,6 +288,68 @@ class ReplicaObjectRecord(NamedTuple):
             ra=float(csv_dict["ra"]),
             dec=float(csv_dict["dec"]),
             nDiaSources=int(csv_dict["nDiaSources"]),
+        )
+
+
+class SourceReassignRecord(NamedTuple):
+    """Update payload for DisSource reassignment to DiaObject."""
+
+    update_time_ns: int
+    update_order: int
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    diaSourceId: int
+    ra: float
+    dec: float
+    midpointMjdTai: float
+    diaObjectId: int
+
+    @classmethod
+    def from_row(cls, row: Any) -> SourceReassignRecord | None:
+        update_payload = json.loads(cast(str, row.update_payload))
+        if update_payload["update_type"] != "reassign_diasource_to_diaobject":
+            return None
+        return cls(
+            update_time_ns=row.update_time_ns,
+            update_order=row.update_order,
+            apdb_replica_chunk=row.apdb_replica_chunk,
+            apdb_replica_subchunk=row.apdb_replica_subchunk,
+            diaSourceId=update_payload["diaSourceId"],
+            ra=update_payload["ra"],
+            dec=update_payload["dec"],
+            midpointMjdTai=update_payload["midpointMjdTai"],
+            diaObjectId=update_payload["diaObjectId"],
+        )
+
+
+class CloseValidityRecord(NamedTuple):
+    """Update payload for closing DiaObject validity."""
+
+    update_time_ns: int
+    update_order: int
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    diaObjectId: int
+    ra: float
+    dec: float
+    validityEndMjdTai: float
+    nDiaSources: int | None
+
+    @classmethod
+    def from_row(cls, row: Any) -> CloseValidityRecord | None:
+        update_payload = json.loads(cast(str, row.update_payload))
+        if update_payload["update_type"] != "close_diaobject_validity":
+            return None
+        return cls(
+            update_time_ns=row.update_time_ns,
+            update_order=row.update_order,
+            apdb_replica_chunk=row.apdb_replica_chunk,
+            apdb_replica_subchunk=row.apdb_replica_subchunk,
+            diaObjectId=update_payload["diaObjectId"],
+            ra=update_payload["ra"],
+            dec=update_payload["dec"],
+            validityEndMjdTai=update_payload["validityEndMjdTai"],
+            nDiaSources=update_payload["nDiaSources"],
         )
 
 
@@ -684,8 +749,23 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
 
     archive = ZipFile(output_archive, "x", ZIP_DEFLATED, compresslevel=9)
 
+    reassign_records, close_validity_records = _read_update_records(apdb)
+
+    id_getter = attrgetter("diaSourceId")
+    source_reassignments: dict[int, list[SourceReassignRecord]] = {
+        key: sorted(items)
+        for key, items in itertools.groupby(sorted(reassign_records, key=id_getter), id_getter)
+    }
+    for diaSourceId, records in source_reassignments.items():
+        if len(records) > 1:
+            _LOG.debug("Multiple reassignments for diaSourceId %d: %s", diaSourceId, records)
+
+    closed_dia_object_ids = {rec.diaObjectId for rec in close_validity_records}
+
     # Drop/re-create DiaSources in regular table.
-    _recreate_regular_sources(apdb, to_keep, to_drop, archive, update)
+    _recreate_regular_sources(
+        apdb, to_keep, to_drop, source_reassignments, closed_dia_object_ids, archive, update
+    )
 
     # Drop duplicated processing from replica table.
     _drop_replica_sources(apdb, to_drop, archive, update)
@@ -796,6 +876,8 @@ def _recreate_regular_sources(
     apdb: ApdbCassandra,
     to_keep: list[DiaSourceReplica],
     to_drop: list[DiaSourceReplica],
+    source_reassignments: dict[int, list[SourceReassignRecord]],
+    closed_dia_object_ids: set[int],
     archive: ZipFile,
     update: bool,
 ) -> None:
@@ -811,6 +893,10 @@ def _recreate_regular_sources(
     to_drop
         List of records from replica tables that we have to drop - these
         records were created by daytime re-processing.
+    source_reassignments
+        Records of DiaSource reassignments indexed by diaSourceId.
+    closed_dia_object_ids
+        DiaObject IDs which were closed by DiaObject deduplication.
     archive
         `ZipFile` where to store CSV files with deleted or inserted records.
     update
@@ -1119,3 +1205,57 @@ def _find_regular_sources(apdb: ApdbCassandra, sources: list[DiaSourceReplica]) 
     _LOG.info("Found %d DiaSource records from %d unique sources", len(records), len(record_ids))
 
     return records
+
+
+def _read_update_records(apdb: ApdbCassandra) -> tuple[list[SourceReassignRecord], list[CloseValidityRecord]]:
+    context = apdb._context
+    config = context.config
+
+    # Get the list of chunks.
+    chunks = apdb.get_replica().getReplicaChunks() or []
+    _LOG.info("Found %d replica chunks", len(chunks))
+    if not chunks:
+        return [], []
+
+    table_name = context.schema.tableName(ExtraTables.ApdbUpdateRecordChunks)
+    query = (
+        Select(config.keyspace, table_name, ["*"])
+        .where(C("apdb_replica_chunk") == 0)
+        .where(C("apdb_replica_subchunk") == 0)
+    )
+    statement = context.stmt_factory(query, prepare=True)
+
+    queries: list[tuple] = []
+    for chunk in chunks:
+        for subchunk in range(config.replica_sub_chunk_count):
+            queries.append((statement, (chunk.id, subchunk)))
+
+    results = cassandra.concurrent.execute_concurrent(
+        context.session,
+        queries,
+        results_generator=True,
+        raise_on_first_error=False,
+        concurrency=config.connection_config.read_concurrency,
+        execution_profile="read_named_tuples",
+    )
+
+    reassign_records = []
+    close_validity_records = []
+    for success, result in results:
+        if success:
+            for row in result:
+                if reassign_record := SourceReassignRecord.from_row(row):
+                    reassign_records.append(reassign_record)
+                elif close_validity_record := CloseValidityRecord.from_row(row):
+                    close_validity_records.append(close_validity_record)
+        else:
+            _LOG.error("error returned by query: %s", result)
+            raise result
+
+    _LOG.info(
+        "Found %d DiaSource reassign records and %d DiaObject close validity records",
+        len(reassign_records),
+        len(close_validity_records),
+    )
+
+    return reassign_records, close_validity_records
