@@ -28,7 +28,7 @@ from collections.abc import Sequence
 
 from lsst.dax.apdb.cli.logging_cli import LoggingCli
 
-from ..scripts import cleanup_dm55633
+from ..scripts import cleanup_dm55633, cleanup_dm55633_2
 
 
 def main(args: Sequence[str] | None = None) -> None:
@@ -108,4 +108,4 @@ def _cleanup_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
         default=False,
         action="store_true",
     )
-    parser.set_defaults(method=cleanup_dm55633.cleanup_sources)
+    parser.set_defaults(method=cleanup_dm55633_2.cleanup_sources)
