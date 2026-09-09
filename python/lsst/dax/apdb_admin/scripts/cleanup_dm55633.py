@@ -392,6 +392,36 @@ class RecordUpdates(NamedTuple):
         )
 
 
+class DiaSourceToPartition(NamedTuple):
+    diaSourceId: int
+    apdb_part: int
+    apdb_replica_chunk: int
+    apdb_replica_subchunk: int
+    apdb_time_part: int
+
+    @classmethod
+    def from_row(cls, row: Any) -> DiaSourceToPartition:
+        return cls(
+            diaSourceId=row.diaSourceId,
+            apdb_part=row.apdb_part,
+            apdb_replica_chunk=row.apdb_replica_chunk,
+            apdb_replica_subchunk=row.apdb_replica_subchunk,
+            apdb_time_part=row.apdb_time_part,
+        )
+
+    @classmethod
+    def from_source(cls, record: DiaSourceReplica, partitioner: Partitioner) -> DiaSourceToPartition:
+        apdb_part = partitioner.pixel(record.ra, record.dec)
+        apdb_time_part = partitioner.time_partition(record.midpointMjdTai)
+        return cls(
+            diaSourceId=record.diaSourceId,
+            apdb_part=apdb_part,
+            apdb_replica_chunk=record.apdb_replica_chunk,
+            apdb_replica_subchunk=record.apdb_replica_subchunk,
+            apdb_time_part=apdb_time_part,
+        )
+
+
 def find_visit_detector(apdb_config: str) -> None:
     """Find visit-detector combinations that were processed more than once.
 
@@ -887,6 +917,15 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
 
     # Drop source reassignments.
     _drop_reassignments(apdb, record_updates.drop_reassign_records, archive, update)
+
+    # Fix records in DiaSourceToPartition table.
+    _fix_dia_source_partition(
+        apdb,
+        to_keep,
+        record_updates.drop_replica_records,
+        archive,
+        update,
+    )
 
 
 def _partition_counts(
@@ -1501,7 +1540,7 @@ def _drop_replica_sources(
         )
 
     # Dump records that were deleted to CSV file.
-    with archive.open("dropped-replica-records.csv", "w") as output:
+    with archive.open("replica-dropped-records.csv", "w") as output:
         if to_drop:
             writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
             writer.writerow(to_drop[0]._fields)
@@ -1548,7 +1587,7 @@ def _drop_reassignments(
         _LOG.info("Would have executed %d DELETE queries on %s", len(queries), table_name)
 
     # Dump records that were deleted to CSV file.
-    with archive.open("dropped-reassignments-records.csv", "w") as output:
+    with archive.open("reassignments-dropped-records.csv", "w") as output:
         if records:
             writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
             writer.writerow(records[0]._fields)
@@ -1585,7 +1624,7 @@ def _insert_regular_records(
         statements[time_partition] = context.stmt_factory(query, prepare=True)
 
     queries = []
-    with archive.open("inserted-regular-records.csv", "w") as output:
+    with archive.open("regular-inserted-records.csv", "w") as output:
         writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
         writer.writerow(["apdb_time_part", "apdb_part"] + columns)
 
@@ -1630,7 +1669,7 @@ def _drop_regular_records(
         statements[time_partition] = context.stmt_factory(query, prepare=True)
 
     queries = []
-    with archive.open("dropped-regular-records.csv", "w") as output:
+    with archive.open("regular-dropped-records.csv", "w") as output:
         writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
         if records:
             writer.writerow(["apdb_time_part"] + list(records[0]._fields))
@@ -1772,3 +1811,119 @@ def _read_update_records(apdb: ApdbCassandra) -> tuple[list[SourceReassignRecord
     )
 
     return reassign_records, close_validity_records
+
+
+def _fix_dia_source_partition(
+    apdb: ApdbCassandra,
+    sources_to_keep: list[DiaSourceReplica],
+    sources_to_drop: list[DiaSourceReplica],
+    archive: ZipFile,
+    update: bool,
+) -> None:
+    """Update DiaSourceToPartition records with the correct info.
+
+    Parameters
+    ----------
+    apdb
+        Cassandra APDB instance.
+    sources_to_keep
+        List of records from replica tables that we have to keep - these
+        records were created on the initial processing (in PP).
+    sources_to_drop
+        List of records from replica tables that we have to drop - these
+        records were created by daytime re-processing.
+    archive
+        `ZipFile` where to store CSV files with deleted or inserted records.
+    update
+        If `False` then skip actual updates.
+    """
+    context = apdb._context
+    config = context.config
+
+    to_keep = {DiaSourceToPartition.from_source(src, context.partitioner) for src in sources_to_keep}
+    to_drop = {DiaSourceToPartition.from_source(src, context.partitioner) for src in sources_to_drop}
+
+    source_ids = {rec.diaSourceId for rec in itertools.chain(to_keep, to_drop)}
+
+    table_name = context.schema.tableName(ExtraTables.DiaSourceToPartition)
+    _LOG.info("Searching for matching %d sources in %s", len(source_ids), table_name)
+
+    query = Select(config.keyspace, table_name, ["*"]).where(C("diaSourceId") == 0)
+    statement = context.stmt_factory(query, prepare=True)
+
+    queries: list[tuple] = []
+    for source_id in source_ids:
+        queries.append((statement, (source_id,)))
+
+    results = cassandra.concurrent.execute_concurrent(
+        context.session,
+        queries,
+        results_generator=True,
+        raise_on_first_error=False,
+        concurrency=config.connection_config.read_concurrency,
+        execution_profile="read_named_tuples",
+    )
+
+    existing: list[DiaSourceToPartition] = []
+    for success, result in results:
+        if success:
+            existing.extend(DiaSourceToPartition.from_row(row) for row in result)
+        else:
+            _LOG.error("error returned by query: %s", result)
+            raise result
+
+    _LOG.debug("_fix_dia_source_partition: Loaded %d records from %s", len(existing), table_name)
+
+    will_keep: list[DiaSourceToPartition] = []
+    will_drop: list[DiaSourceToPartition] = []
+    for record in existing:
+        if record in to_keep:
+            will_keep.append(record)
+            to_keep.remove(record)
+            _LOG.debug("_fix_dia_source_partition: source_id=%d, will keep", record.diaSourceId)
+        else:
+            _LOG.debug("_fix_dia_source_partition: source_id=%d, will drop", record.diaSourceId)
+            will_drop.append(record)
+
+    if _LOG.isEnabledFor(logging.DEBUG):
+        for record in to_keep:
+            _LOG.debug("_fix_dia_source_partition: source_id=%d, will recreate", record.diaSourceId)
+
+    # Drop some records.
+    _LOG.info("Will drop %d records from %s", len(will_drop), table_name)
+    delete = Delete(config.keyspace, table_name).where(C("diaSourceId") == 0)
+    statement = context.stmt_factory(delete, prepare=True)
+    deletes: list[tuple] = []
+    with archive.open("diasourcetopartition-dropped-records.csv", "w") as output:
+        writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+        writer.writerow(DiaSourceToPartition._fields)
+
+        for record in will_drop:
+            deletes.append((statement, (record.diaSourceId,)))
+            writer.writerow(record)
+
+    if update:
+        for query_chunk in chunk_iterable(deletes, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Deleted %d records from %s", len(deletes), table_name)
+    else:
+        _LOG.info("Would have deleted %d records from %s", len(deletes), table_name)
+
+    # Recreate some records
+    _LOG.info("Will insert %d records into %s", len(to_keep), table_name)
+    insert = Insert(context.config.keyspace, table_name, DiaSourceToPartition._fields)
+    statement = context.stmt_factory(insert, prepare=True)
+    inserts: list[tuple] = []
+    with archive.open("diasourcetopartition-inserted-records.csv", "w") as output:
+        writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+        writer.writerow(DiaSourceToPartition._fields)
+        for record in to_keep:
+            inserts.append((statement, record))
+            writer.writerow(record)
+
+    if update:
+        for query_chunk in chunk_iterable(inserts, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Inserted %d records into %s", len(inserts), table_name)
+    else:
+        _LOG.info("Would have inserted %d records into %s", len(inserts), table_name)

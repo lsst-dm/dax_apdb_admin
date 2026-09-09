@@ -122,3 +122,39 @@ Combinations of cases:
    - keep initial record
    - keep first reassignment record
    - drop second reassignment record
+
+DiaSources assigned to invalidated DiaObjects
+---------------------------------------------
+
+After all above fixes there is a small number of initial DiaSource records that are assigned to invalidated DiaObjects.
+This is likely due to a variation of this scenario:
+
+- Initial processing creates DiaSource and associates it to some DiaObject.
+- Reprocessing creates DiaSource with the same ID at different coordinates associated with different DiaObject.
+- DiaObject deduplication decides to eliminate DiaObject with the initial DiaSource association.
+- Reprocessed DiaSource "hides" initial DiaSource, so deduplication does not see it and does not reassign it.
+
+Here is the list of these DiaSources:
+
+    Closed diaObjectId: 170032912556097678
+      DiaSource: chunk=1771828200 id=170046118907347217 ra=148.79543052752135 dec=1.124901868165004 part=59526158 obj_id=170028514776973502 ss_id=None
+    Closed diaObjectId: 313871014972882979
+      DiaSource: chunk=1771558800 id=170032897244266602 ra=62.724261693035416 dec=-49.05700708410277 part=44484419 obj_id=313871014972882979 ss_id=None
+    Closed diaObjectId: 313756673035468934
+      DiaSource: chunk=1771558800 id=170032897244266575 ra=62.61214203182979 dec=-49.07971276707365 part=44484430 obj_id=313756673035468934 ss_id=None
+    Closed diaObjectId: 313853501347725449
+      DiaSource: chunk=1771558800 id=170032897244266603 ra=62.71818594850555 dec=-49.05183053185953 part=44484418 obj_id=313853501347725449 ss_id=None
+    Closed diaObjectId: 170028485642813483
+      DiaSource: chunk=1771558800 id=170032897244266553 ra=62.62802725987654 dec=-49.13248137292401 part=44484116 obj_id=170028485642813483 ss_id=None
+    Closed diaObjectId: 313756671658164370
+      DiaSource: chunk=1771558800 id=170032897244266624 ra=62.49921766304578 dec=-48.94502261992475 part=44484444 obj_id=313756671658164370 ss_id=None
+    Closed diaObjectId: 313761042353618970
+      DiaSource: chunk=1771558800 id=170032897244266599 ra=62.48209236292681 dec=-48.97853348970782 part=44484445 obj_id=313761042353618970 ss_id=None
+    Closed diaObjectId: 313985346781577240
+      DiaSource: chunk=1771813200 id=170046083783720963 ra=57.26549685208388 dec=-48.96335549807423 part=44632597 obj_id=313967752752136260 ss_id=None
+    Closed diaObjectId: 313897383821836488
+      DiaSource: chunk=1771813800 id=170046086465454207 ra=59.373385342360166 dec=-48.24487824896292 part=44644075 obj_id=313963359375982661 ss_id=None
+    Closed diaObjectId: 313994144746831958
+      DiaSource: chunk=1771897200 id=170050480619126966 ra=58.194382584492594 dec=-49.277995977479456 part=44632339 obj_id=313871014480052299 ss_id=None
+    Closed diaObjectId: 313994144746831958
+      DiaSource: chunk=1771897200 id=170050481696014426 ra=58.194339697138105 dec=-49.27804661683134 part=44632339 obj_id=313871014480052299 ss_id=None
