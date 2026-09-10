@@ -29,6 +29,7 @@ import itertools
 import json
 import logging
 import sys
+import uuid
 from collections import Counter, defaultdict
 from collections.abc import Generator, Iterable
 from operator import attrgetter
@@ -312,12 +313,13 @@ class ReplicaObjectRecord(NamedTuple):
 
 
 class SourceReassignRecord(NamedTuple):
-    """Update payload for DisSource reassignment to DiaObject."""
+    """Update payload for DiaSource reassignment to DiaObject."""
 
     update_time_ns: int
     update_order: int
     apdb_replica_chunk: int
     apdb_replica_subchunk: int
+    update_unique_id: uuid.UUID
     diaSourceId: int
     ra: float
     dec: float
@@ -334,6 +336,7 @@ class SourceReassignRecord(NamedTuple):
             update_order=row.update_order,
             apdb_replica_chunk=row.apdb_replica_chunk,
             apdb_replica_subchunk=row.apdb_replica_subchunk,
+            update_unique_id=row.update_unique_id,
             diaSourceId=update_payload["diaSourceId"],
             ra=update_payload["ra"],
             dec=update_payload["dec"],
@@ -863,7 +866,7 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
         if len(partitions) > 1
     }
     _LOG.info(
-        "Number of sources with multiple partitions in regular tables: %s", len(replicas_multi_partitions)
+        "Number of sources with multiple partitions in regular tables: %s", len(regular_multi_partitions)
     )
     _LOG.debug("Regular source IDs with multiple partitions: %s", sorted(regular_multi_partitions))
 
@@ -898,9 +901,12 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
         len(record_updates.drop_reassign_records),
     )
 
+    # Generate reassign records for DiaSources which were shadowed.
+    special_reassigns = _special_reassigns(record_updates.keep_initial_records, reassign_records)
+
     # Reapply DiaObject reassignments to the initial records.
     to_keep = _reassign_initial_records(
-        record_updates.keep_initial_records, record_updates.keep_reassign_records
+        record_updates.keep_initial_records, record_updates.keep_reassign_records + special_reassigns
     )
 
     # Drop/re-create DiaSources in regular table.
@@ -918,6 +924,9 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
     # Drop source reassignments.
     _drop_reassignments(apdb, record_updates.drop_reassign_records, archive, update)
 
+    # Add source reassignments.
+    _insert_reassignments(apdb, special_reassigns, archive, update)
+
     # Fix records in DiaSourceToPartition table.
     _fix_dia_source_partition(
         apdb,
@@ -926,6 +935,8 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
         archive,
         update,
     )
+
+    archive.close()
 
 
 def _partition_counts(
@@ -968,7 +979,7 @@ def _find_replica_sources(
     apdb
         APDB instance.
     vd_chunks
-        MApping of VisitDetector to the list of replica chunks.
+        Mapping of VisitDetector to the list of replica chunks.
     """
     context = apdb._context
     config = context.config
@@ -1409,7 +1420,7 @@ def _recreate_regular_sources(
 
     def _group_by_vd(records: list[DiaSourceReplica]) -> dict[VisitDetector, list[DiaSourceReplica]]:
         grouped: dict[VisitDetector, list[DiaSourceReplica]] = defaultdict(list)
-        for record in to_keep:
+        for record in records:
             vd = VisitDetector(record.visit, record.detector)
             grouped[vd].append(record)
         return grouped
@@ -1484,7 +1495,7 @@ def _drop_replica_sources(
     count_query = count_query.where(C("apdb_replica_subchunk") == 0)
     count_stmt = context.stmt_factory(count_query, prepare=True)
 
-    # Wind total number of records in each partition.
+    # Find total number of records in each partition.
     stmts = []
     for chunk, subchunk in sources_by_chunk:
         stmts.append((count_stmt, (chunk, subchunk)))
@@ -1588,6 +1599,68 @@ def _drop_reassignments(
 
     # Dump records that were deleted to CSV file.
     with archive.open("reassignments-dropped-records.csv", "w") as output:
+        if records:
+            writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
+            writer.writerow(records[0]._fields)
+            writer.writerows(records)
+
+
+def _insert_reassignments(
+    apdb: ApdbCassandra, records: list[SourceReassignRecord], archive: ZipFile, update: bool
+) -> None:
+    context = apdb._context
+    config = context.config
+
+    table_name = context.schema.tableName(ExtraTables.ApdbUpdateRecordChunks)
+    # Primary key also includes unique_id but it is only for consistency
+    # checking when replicating.
+    columns = [
+        "apdb_replica_chunk",
+        "apdb_replica_subchunk",
+        "update_time_ns",
+        "update_order",
+        "update_unique_id",
+        "update_payload",
+    ]
+
+    query = Insert(config.keyspace, table_name, columns)
+    stmt = context.stmt_factory(query, prepare=False)
+
+    queries: list[tuple[Insert, tuple]] = []
+    for record in records:
+        payload = json.dumps(
+            {
+                "diaSourceId": record.diaSourceId,
+                "ra": record.ra,
+                "dec": record.dec,
+                "midpointMjdTai": record.midpointMjdTai,
+                "diaObjectId": record.diaObjectId,
+                "update_type": "reassign_diasource_to_diaobject",
+            }
+        )
+        queries.append(
+            (
+                stmt,
+                (
+                    record.apdb_replica_chunk,
+                    record.apdb_replica_subchunk,
+                    record.update_time_ns,
+                    record.update_order,
+                    record.update_unique_id,
+                    payload,
+                ),
+            )
+        )
+
+    if update:
+        for query_chunk in chunk_iterable(queries, 1000):
+            execute_concurrent(context.session, list(query_chunk), execution_profile="write")
+        _LOG.info("Executed %d INSERT queries on %s", len(queries), table_name)
+    else:
+        _LOG.info("Would have executed %d INSERT queries on %s", len(queries), table_name)
+
+    # Dump records that were deleted to CSV file.
+    with archive.open("reassignments-inserted-records.csv", "w") as output:
         if records:
             writer = csv.writer(io.TextIOWrapper(output, newline="", write_through=True))
             writer.writerow(records[0]._fields)
@@ -1927,3 +2000,72 @@ def _fix_dia_source_partition(
         _LOG.info("Inserted %d records into %s", len(inserts), table_name)
     else:
         _LOG.info("Would have inserted %d records into %s", len(inserts), table_name)
+
+
+def _special_reassigns(
+    initial_records: list[DiaSourceReplica], existing_reassign_records: list[SourceReassignRecord]
+) -> list[SourceReassignRecord]:
+    # Source ID to object ID reassignment.
+    extra_reassignments = {
+        170046118907347217: 170046094904918238,
+        170032897244266602: 313871013915918557,
+        170032897244266575: 313871015259144202,
+        170032897244266603: 170032883556155412,
+        170032897244266553: 170028492083691656,
+        170032897244266624: 170032885700493314,
+        170032897244266599: 313761043606142985,
+        170046083783720963: 170081276613623835,
+        170046086465454207: 170046073731022999,
+        170050480619126966: 170046073736790169,
+        170050481696014426: 170046073736790169,
+    }
+
+    # Filter relevant DiaObjects.
+    extra_reassignments_object_ids = set(extra_reassignments.values())
+    existing_reassign_records = [
+        rec for rec in existing_reassign_records if rec.diaObjectId in extra_reassignments_object_ids
+    ]
+
+    reassigned_initial_records = {
+        rec.diaSourceId: rec for rec in initial_records if rec.diaSourceId in extra_reassignments
+    }
+    assert len(reassigned_initial_records) == len(extra_reassignments)
+
+    obj_id_getter = attrgetter("diaObjectId")
+    by_object_id: dict[int, list[SourceReassignRecord]] = {
+        key: list(val)
+        for key, val in itertools.groupby(sorted(existing_reassign_records, key=obj_id_getter), obj_id_getter)
+    }
+
+    # Verify that existing reassignments all come from a single operation.
+    update_order_by_id = {}
+    for diaObjectId, reassignments in by_object_id.items():
+        assert len({rec.apdb_replica_chunk for rec in reassignments})
+        assert len({rec.apdb_replica_subchunk for rec in reassignments})
+        assert len({rec.update_time_ns for rec in reassignments})
+        assert len({rec.update_unique_id for rec in reassignments})
+        update_order_by_id[diaObjectId] = max(rec.update_order for rec in reassignments)
+
+    result = []
+    for diaSourceId, diaObjectId in extra_reassignments.items():
+        initial_record = reassigned_initial_records[diaSourceId]
+        existing_rec = by_object_id[diaObjectId][0]
+        update_order_by_id[diaObjectId] += 1
+        result.append(
+            SourceReassignRecord(
+                update_time_ns=existing_rec.update_time_ns,
+                update_order=update_order_by_id[diaObjectId],
+                apdb_replica_chunk=existing_rec.apdb_replica_chunk,
+                apdb_replica_subchunk=existing_rec.apdb_replica_subchunk,
+                update_unique_id=existing_rec.update_unique_id,
+                diaSourceId=diaSourceId,
+                ra=initial_record.ra,
+                dec=initial_record.dec,
+                midpointMjdTai=initial_record.midpointMjdTai,
+                diaObjectId=diaObjectId,
+            )
+        )
+
+    _LOG.info("Generated %d special reassignment records", len(result))
+
+    return result

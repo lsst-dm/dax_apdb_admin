@@ -1,4 +1,4 @@
-# This file is part of dax_apdb
+# This file is part of dax_apdb_admin
 #
 # Developed for the LSST Data Management System.
 # This product includes software developed by the LSST Project
