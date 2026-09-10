@@ -57,6 +57,7 @@ version = { attr = "lsst_versions.get_lsst_version" }
 
 [project.scripts]
 apdb-admin = "lsst.dax.apdb_admin.cli.apdb_admin_cli:main"
+apdb-cleanup-dm55633 = "lsst.dax.apdb_admin.cli.apdb_cleanup_dm55633:main"
 
 [tool.black]
 line-length = 110
@@ -147,6 +148,8 @@ checks = [
     "RT01",  # Unfortunately our @property trigger this.
     "RT02",  # Does not want named return value. DM style says we do.
     "SS05",  # pydocstyle is better at finding infinitive verb.
+    "RT03",  # Temporarily disable for sphinx empty returns.
+    "PR04",  # New Sphinx can infer types from python typing
 ]
 
 # Pytest configuration required to prevent pytest from looking for
