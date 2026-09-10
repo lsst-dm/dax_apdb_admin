@@ -1458,7 +1458,7 @@ def _recreate_regular_sources(
     _drop_regular_records(apdb, will_drop, archive, update)
 
     # Whatever is left in ids_to_keep will need to be re-created.
-    _insert_regular_records(apdb, ids_to_keep.values(), archive, update)
+    _insert_regular_records(apdb, list(ids_to_keep.values()), archive, update)
 
 
 def _same_record(regular_record: DiaSource, replica_record: DiaSourceReplica) -> bool:
@@ -1668,20 +1668,15 @@ def _insert_reassignments(
 
 
 def _insert_regular_records(
-    apdb: ApdbCassandra, records: Iterable[DiaSourceReplica], archive: ZipFile, update: bool
+    apdb: ApdbCassandra, records: list[DiaSourceReplica], archive: ZipFile, update: bool
 ) -> None:
     # Use replica DiaSources to recreate regular DiaSources.
 
     context = apdb._context
     partitioner = context.partitioner
 
-    # We need to iterate more than once.
-    record_list = list(records)
-    if not record_list:
-        return
-
     # Get the list of regular columns in the DiaSource.
-    columns = list(record_list[0]._fields)
+    columns = list(records[0]._fields)
     columns.remove("apdb_replica_chunk")
     columns.remove("apdb_replica_subchunk")
 
