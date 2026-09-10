@@ -1,4 +1,4 @@
-# This file is part of dax_apdb
+# This file is part of dax_apdb_admin
 #
 # Developed for the LSST Data Management System.
 # This product includes software developed by the LSST Project
@@ -96,7 +96,7 @@ def _find_replica_objects_subcommand(subparsers: argparse._SubParsersAction) -> 
 
 
 def _cleanup_sources_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("cleanup-sources", help="Find matching DiaObjects in replica tables.")
+    parser = subparsers.add_parser("cleanup-sources", help="Cleanup duplicate DiaSources in APDB tables.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.add_argument("visit_detector", help="Path to a file produced by `find-visit-detector`.")
     parser.add_argument(
