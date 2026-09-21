@@ -23,7 +23,6 @@ from __future__ import annotations
 
 __all__ = ["ForcedSourceInfo", "ObjectInfo", "SourceInfo"]
 
-import datetime
 from collections import defaultdict
 from collections.abc import Collection
 from typing import TYPE_CHECKING, NamedTuple
@@ -75,7 +74,7 @@ class SourceInfo(NamedTuple):
 
     diaObjectId: int
     diaSourceId: int
-    time_processed: datetime.datetime
+    timeProcessedMjdTai: float
     midpointMjdTai: float
     visit: int
     detector: int
@@ -101,7 +100,7 @@ class SourceInfo(NamedTuple):
             source = SourceInfo(
                 diaObjectId=row.diaObjectId,
                 diaSourceId=row.diaSourceId,
-                time_processed=row.time_processed.replace(tzinfo=datetime.UTC),
+                timeProcessedMjdTai=row.timeProcessedMjdTai,
                 midpointMjdTai=row.midpointMjdTai,
                 visit=row.visit,
                 detector=row.detector,
@@ -139,7 +138,7 @@ class ForcedSourceInfo(NamedTuple):
 
     diaObjectId: int
     diaForcedSourceId: int
-    time_processed: datetime.datetime
+    timeProcessedMjdTai: float
     midpointMjdTai: float
     visit: int
     detector: int
@@ -165,7 +164,7 @@ class ForcedSourceInfo(NamedTuple):
             info = ForcedSourceInfo(
                 diaObjectId=row.diaObjectId,
                 diaForcedSourceId=row.diaForcedSourceId,
-                time_processed=row.time_processed.replace(tzinfo=datetime.UTC),
+                timeProcessedMjdTai=row.timeProcessedMjdTai,
                 midpointMjdTai=row.midpointMjdTai,
                 visit=row.visit,
                 detector=row.detector,
