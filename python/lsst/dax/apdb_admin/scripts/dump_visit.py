@@ -45,7 +45,7 @@ def dump_visit(
     detectors: Collection[int],
     verbose: int,
 ) -> None:
-    """List contents of APDB index file.
+    """Dump APDB contents for a specific visit and detectors.
 
     Parameters
     ----------
@@ -61,6 +61,12 @@ def dump_visit(
         List of detector numbers, if empty then all SCIENCE detectors are used.
     verbose : `int`
         Verbosity level.
+
+    Notes
+    -----
+    It uses visit/detector definition form Butler. For each visit/detector it
+    retrieves a corresponding region and dumps all APDB records from each
+    region. Note that regions are typically padded and can overlap.
     """
     # make sorted list of region records
     butler = Butler.from_config(butler_config)

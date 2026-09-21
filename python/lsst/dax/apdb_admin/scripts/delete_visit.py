@@ -46,7 +46,7 @@ def delete_visit(
     delete: bool,
     no_sources: bool,
 ) -> None:
-    """List contents of APDB index file.
+    """DElete DiaObject records created first in a particular visit.
 
     Parameters
     ----------
@@ -61,11 +61,19 @@ def delete_visit(
     detectors : `~collections.abc.Collection` [`int`]
         List of detector numbers, if empty then all SCIENCE detectors are used.
     delete : `bool`
-        If `True` then do actual deletion, othervise just print records to be
+        If `True` then do actual deletion, otherwise just print records to be
         deleted.
     no_sources : `bool`
         If `True` only delete objects that have no associated sources, and
         delete associated forced sources.
+
+    Notes
+    -----
+    It uses visit/detector region definition form Butler. For each
+    visit/detector region it finds all DiaObjects and DiaSources in the region.
+    For each DiaObject it finds the earliest corresponding DiaSource. If that
+    earliest DiaSource was made in that visit/detector then the DiaObject and
+    all its matching DiaSources and DiaForcedSources are deleted.
     """
     # make sorted list of region records
     butler = Butler.from_config(butler_config)

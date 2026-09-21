@@ -27,14 +27,14 @@ __all__ = ["filter_region"]
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from lsst import sphgeom
+import lsst.sphgeom as sphgeom
 
 if TYPE_CHECKING:
     import pandas
 
 
 def filter_region(objects: pandas.DataFrame, region: sphgeom.Region) -> pandas.DataFrame:
-    """Filter out objects from a catalog which are outside region.
+    """Filter out objects from a catalog which are outside given region.
 
     Parameters
     ----------

@@ -44,6 +44,18 @@ class ObjectInfo(NamedTuple):
 
     @staticmethod
     def from_pandas(df: pandas.DataFrame) -> list[ObjectInfo]:
+        """Make list of ObjectInfos from pandas DataFrame.
+
+        Parameters
+        ----------
+        df : `pandas.DataFrame`
+            DataFrame to convert to ObjectInfo collection.
+
+        Returns
+        -------
+        infos : `list` [`ObjectInfo`]
+            Resulting ObjectInfo instances.
+        """
         infos = []
         for row in df.itertuples(index=False):
             info = ObjectInfo(
@@ -101,8 +113,8 @@ class SourceInfo(NamedTuple):
 
     @staticmethod
     def group_by_object(infos: Collection[SourceInfo]) -> dict[int, list[SourceInfo]]:
-        """Group SourceInfos by diaObjectId, ordering them in each group by
-        midpointTaiMjd.
+        """Group SourceInfos by ``diaObjectId``, ordering them in each group by
+        ``midpointMjdTai``.
 
         Parameters
         ----------
@@ -112,7 +124,7 @@ class SourceInfo(NamedTuple):
         Returns
         -------
         sources : `dict`
-            Sources grouped bu diaObjectId.
+            Sources grouped by ``diaObjectId``.
         """
         info_map = defaultdict(list)
         for info in infos:
@@ -136,7 +148,7 @@ class ForcedSourceInfo(NamedTuple):
 
     @staticmethod
     def from_pandas(df: pandas.DataFrame) -> list[ForcedSourceInfo]:
-        """Make list of SourceInfos from pandas DataFrame.
+        """Make list of ForcedSourceInfos from pandas DataFrame.
 
         Parameters
         ----------
@@ -166,8 +178,8 @@ class ForcedSourceInfo(NamedTuple):
 
     @staticmethod
     def group_by_object(infos: Collection[ForcedSourceInfo]) -> dict[int, list[ForcedSourceInfo]]:
-        """Group ForcedSourceInfos by diaObjectId, ordering them in each group
-        by midpointTaiMjd.
+        """Group ForcedSourceInfos by ``diaObjectId``, ordering them in each
+        group by ``midpointMjdTai``.
 
         Parameters
         ----------
@@ -177,7 +189,7 @@ class ForcedSourceInfo(NamedTuple):
         Returns
         -------
         sources : `dict`
-            ForcedSources grouped bu diaObjectId.
+            ForcedSources grouped by diaObjectId.
         """
         info_map = defaultdict(list)
         for info in infos:
