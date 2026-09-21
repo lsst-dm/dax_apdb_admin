@@ -1,16 +1,16 @@
-.. py:currentmodule:: lsst.dax.apdb.admin
+.. py:currentmodule:: lsst.dax.apdb_admin
 
-.. _lsst.dax.apdb.admin:
+.. _lsst.dax.apdb_admin:
 
 ###################
-lsst.dax.apdb.admin
+lsst.dax.apdb_admin
 ###################
 
 .. Paragraph that describes what this Python module does and links to related modules and frameworks.
 
-.. .. _lsst.dax.apdb.admin-using:
+.. .. _lsst.dax.apdb_admin-using:
 
-.. Using lsst.dax.apdb.admin
+.. Using lsst.dax.apdb_admin
 .. =========================
 
 .. toctree linking to topics related to using the module's APIs.
@@ -18,12 +18,12 @@ lsst.dax.apdb.admin
 .. .. toctree::
 ..    :maxdepth: 1
 
-.. _lsst.dax.apdb.admin-contributing:
+.. _lsst.dax.apdb_admin-contributing:
 
 Contributing
 ============
 
-``lsst.dax.apdb.admin`` is developed at https://github.com/lsst-dm/dax_apdb_admin.
+``lsst.dax.apdb_admin`` is developed at https://github.com/lsst-dm/dax_apdb_admin.
 You can find Jira issues for this module under the `dax_apdb_admin <https://jira.lsstcorp.org/issues/?jql=project%20%3D%20DM%20AND%20component%20%3D%20dax_apdb_admin>`_ component.
 
 .. If there are topics related to developing this module (rather than using it), link to this from a toctree placed here.
@@ -31,7 +31,7 @@ You can find Jira issues for this module under the `dax_apdb_admin <https://jira
 .. .. toctree::
 ..    :maxdepth: 1
 
-.. .. _lsst.dax.apdb.admin-scripts:
+.. .. _lsst.dax.apdb_admin-scripts:
 
 .. Script reference
 .. ================
@@ -41,11 +41,11 @@ You can find Jira issues for this module under the `dax_apdb_admin <https://jira
 .. .. toctree::
 ..    :maxdepth: 1
 
-.. .. _lsst.dax.apdb.admin-pyapi:
+.. .. _lsst.dax.apdb_admin-pyapi:
 
 Python API reference
 ====================
 
-.. automodapi:: lsst.dax.apdb.admin
+.. automodapi:: lsst.dax.apdb_admin
    :no-main-docstr:
    :no-inheritance-diagram:
