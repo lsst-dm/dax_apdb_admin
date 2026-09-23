@@ -139,7 +139,7 @@ def delete_visit(
                         print(
                             f"   DiaSource: diaSourceId={sinfo.diaSourceId} "
                             f"visit={sinfo.visit} detector={sinfo.detector} "
-                            f"time_processed={sinfo.time_processed} "
+                            f"timeProcessedMjdTai={sinfo.timeProcessedMjdTai} "
                             f"ra={sinfo.ra} dec={sinfo.dec}"
                         )
             print("ForcedDiaSources to delete:")
@@ -149,7 +149,7 @@ def delete_visit(
                         print(
                             f"   DiaForcedSource: diaForcedSourceId={fsinfo.diaForcedSourceId} "
                             f"visit={fsinfo.visit} detector={fsinfo.detector} "
-                            f"time_processed={fsinfo.time_processed} "
+                            f"timeProcessedMjdTai={fsinfo.timeProcessedMjdTai} "
                             f"ra={fsinfo.ra} dec={fsinfo.dec}"
                         )
         else:
