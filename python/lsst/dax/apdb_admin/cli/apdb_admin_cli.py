@@ -102,6 +102,7 @@ def _update_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("update", help="Update APDB contents.")
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _delete_visit_subcommand(subparsers)
+    _set_validity_end_subcommand(subparsers)
 
 
 def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
@@ -126,6 +127,27 @@ def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
         help="Only selete objects that have no associated sources, and delete associated forced sources.",
     )
     parser.set_defaults(method=scripts.delete_visit)
+
+
+def _set_validity_end_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("set-validity-end", help="Update validityEnd for DiaObjects.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("jsonl", help="Name of the file with DiaObjects in JSON lines format.")
+    parser.add_argument(
+        "--time",
+        default=None,
+        help=(
+            "Time in astropy ISOT format and TAI scale to use for validityEnd, "
+            "default is to use current time."
+        ),
+    )
+    parser.add_argument(
+        "--update",
+        default=False,
+        action="store_true",
+        help="Actually update, by default only print records to be updated.",
+    )
+    parser.set_defaults(method=scripts.set_validity_end)
 
 
 def _partition_subcommand(subparsers: argparse._SubParsersAction) -> None:

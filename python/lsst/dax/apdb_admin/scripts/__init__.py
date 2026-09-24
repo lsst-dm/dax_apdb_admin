@@ -23,3 +23,4 @@ from .delete_visit import delete_visit
 from .dump_visit import dump_visit
 from .dump_objects_with_no_sources import dump_objects_with_no_sources
 from .partition_show import partition_show_period, partition_show_region, partition_show_time_part
+from .set_validity_end import set_validity_end
