@@ -45,7 +45,7 @@ def main(args: Sequence[str] | None = None) -> None:
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _partition_subcommand(subparsers)
     _dump_subcommand(subparsers)
-    _delete_subcommand(subparsers)
+    _update_subcommand(subparsers)
 
     parsed_args = parser.parse_args(args)
     log_cli.process_args(parsed_args)
@@ -98,14 +98,16 @@ def _dump_objects_with_no_sources(subparsers: argparse._SubParsersAction) -> Non
     parser.set_defaults(method=scripts.dump_objects_with_no_sources)
 
 
-def _delete_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("delete", help="Delete APDB contents.")
+def _update_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("update", help="Update APDB contents.")
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _delete_visit_subcommand(subparsers)
 
 
 def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("visit", help="Delete DiaObjects first created in a particular visit.")
+    parser = subparsers.add_parser(
+        "delete-visit", help="Delete DiaObjects first created in a particular visit."
+    )
     parser.add_argument("butler_config", help="Butler configuration URI.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.add_argument("instrument", help="Instrument name.")
