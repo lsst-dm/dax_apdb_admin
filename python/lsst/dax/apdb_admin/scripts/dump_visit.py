@@ -32,7 +32,7 @@ from astropy.time import Time
 from lsst.daf.butler import Butler
 from lsst.dax.apdb import Apdb
 
-from .. import model, utils
+from .. import butler_queries, model, utils
 
 _LOG = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def dump_visit(
     detectors: Collection[int],
     verbose: int,
 ) -> None:
-    """List contents of APDB index file.
+    """Dump APDB contents for a specific visit and detectors.
 
     Parameters
     ----------
@@ -61,35 +61,22 @@ def dump_visit(
         List of detector numbers, if empty then all SCIENCE detectors are used.
     verbose : `int`
         Verbosity level.
+
+    Notes
+    -----
+    It uses visit/detector definition form Butler. For each visit/detector it
+    retrieves a corresponding region and dumps all APDB records from each
+    region. Note that regions are typically padded and can overlap.
     """
-    # make sorted list of region records
+    # Make sorted list of detector region records.
     butler = Butler.from_config(butler_config)
-
-    # Only look at the SCIENCE detectors
-    detector_records = butler.query_dimension_records("detector", instrument=instrument, visit=visit)
-    science_detectors = {detector.id for detector in detector_records if detector.purpose == "SCIENCE"}
-    detectors = set(detectors)
-    if detectors:
-        unknown = detectors - science_detectors
-        if unknown:
-            _LOG.warning("Specified detectors are not known in this visit: %s", unknown)
-        detectors &= science_detectors
-    else:
-        detectors = science_detectors
-
-    region_records = butler.query_dimension_records(
-        "visit_detector_region", instrument=instrument, visit=visit
-    )
-    region_records = sorted(region_records, key=lambda record: record.detector)
+    region_records = butler_queries.visit_region_records(butler, instrument, visit, detectors)
 
     apdb = Apdb.from_uri(apdb_config)
 
     visit_time = Time.now()
     first_visit_count: Counter = Counter()
     for record in region_records:
-        if detectors and record.detector not in detectors:
-            continue
-
         print(f"--- Processing visit {record.visit} detector {record.detector}")
         region = record.region
 
@@ -137,7 +124,7 @@ def dump_visit(
                         print(
                             f"      DiaSource: diaSourceId={sinfo.diaSourceId} "
                             f"visit={sinfo.visit} detector={sinfo.detector} "
-                            f"time_processed={sinfo.time_processed} "
+                            f"timeProcessedMjdTai={sinfo.timeProcessedMjdTai} "
                             f"midpointMjdTai={sinfo.midpointMjdTai} "
                             f"ra={sinfo.ra} dec={sinfo.dec}"
                         )
@@ -150,7 +137,7 @@ def dump_visit(
                         print(
                             f"      DiaForcedSource: diaForcedSourceId={fsinfo.diaForcedSourceId} "
                             f"visit={fsinfo.visit} detector={fsinfo.detector} "
-                            f"time_processed={fsinfo.time_processed} "
+                            f"timeProcessedMjdTai={fsinfo.timeProcessedMjdTai} "
                             f"midpointMjdTai={fsinfo.midpointMjdTai} "
                             f"ra={fsinfo.ra} dec={fsinfo.dec}"
                         )

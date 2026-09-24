@@ -23,18 +23,21 @@ from __future__ import annotations
 
 __all__ = ["filter_region"]
 
-
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from lsst import sphgeom
+import lsst.sphgeom as sphgeom
+from lsst.dax.apdb.pixelization import Pixelization
 
 if TYPE_CHECKING:
     import pandas
 
+_PIXEL_RE = re.compile(r"(\w+):(\d+)\[(\d+)\]")
+
 
 def filter_region(objects: pandas.DataFrame, region: sphgeom.Region) -> pandas.DataFrame:
-    """Filter out objects from a catalog which are outside region.
+    """Filter out objects from a catalog which are outside given region.
 
     Parameters
     ----------
@@ -58,3 +61,27 @@ def filter_region(objects: pandas.DataFrame, region: sphgeom.Region) -> pandas.D
 
     mask = objects.apply(in_region, axis=1, result_type="reduce")
     return objects[mask]
+
+
+def parse_pixel(pixel_spec: str) -> tuple[Pixelization, int]:
+    """Parse pixel specification string.
+
+    Parameters
+    ----------
+    pixel_spec : `str`
+        Pixel specification, e.g. MQ3C:3[640].
+
+    Returns
+    -------
+    pixelator : `Pixelization`
+        Instance of `Pixelization`.
+    pixel_index : `int`
+        Index of the pixel.
+    """
+    if match := _PIXEL_RE.fullmatch(pixel_spec):
+        pix_type = match.group(1).lower()
+        level = int(match.group(2))
+        pixel = int(match.group(3))
+        return (Pixelization(pix_type, level, 1_000_000_000), pixel)
+    else:
+        raise TypeError(f"Could not parse pixel specification {pixel_spec}")

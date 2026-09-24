@@ -23,7 +23,6 @@ from __future__ import annotations
 
 __all__ = ["ForcedSourceInfo", "ObjectInfo", "SourceInfo"]
 
-import datetime
 from collections import defaultdict
 from collections.abc import Collection
 from typing import TYPE_CHECKING, NamedTuple
@@ -44,6 +43,18 @@ class ObjectInfo(NamedTuple):
 
     @staticmethod
     def from_pandas(df: pandas.DataFrame) -> list[ObjectInfo]:
+        """Make list of ObjectInfos from pandas DataFrame.
+
+        Parameters
+        ----------
+        df : `pandas.DataFrame`
+            DataFrame to convert to ObjectInfo collection.
+
+        Returns
+        -------
+        infos : `list` [`ObjectInfo`]
+            Resulting ObjectInfo instances.
+        """
         infos = []
         for row in df.itertuples(index=False):
             info = ObjectInfo(
@@ -63,7 +74,7 @@ class SourceInfo(NamedTuple):
 
     diaObjectId: int
     diaSourceId: int
-    time_processed: datetime.datetime
+    timeProcessedMjdTai: float
     midpointMjdTai: float
     visit: int
     detector: int
@@ -89,7 +100,7 @@ class SourceInfo(NamedTuple):
             source = SourceInfo(
                 diaObjectId=row.diaObjectId,
                 diaSourceId=row.diaSourceId,
-                time_processed=row.time_processed.replace(tzinfo=datetime.UTC),
+                timeProcessedMjdTai=row.timeProcessedMjdTai,
                 midpointMjdTai=row.midpointMjdTai,
                 visit=row.visit,
                 detector=row.detector,
@@ -101,8 +112,8 @@ class SourceInfo(NamedTuple):
 
     @staticmethod
     def group_by_object(infos: Collection[SourceInfo]) -> dict[int, list[SourceInfo]]:
-        """Group SourceInfos by diaObjectId, ordering them in each group by
-        midpointTaiMjd.
+        """Group SourceInfos by ``diaObjectId``, ordering them in each group by
+        ``midpointMjdTai``.
 
         Parameters
         ----------
@@ -112,7 +123,7 @@ class SourceInfo(NamedTuple):
         Returns
         -------
         sources : `dict`
-            Sources grouped bu diaObjectId.
+            Sources grouped by ``diaObjectId``.
         """
         info_map = defaultdict(list)
         for info in infos:
@@ -127,7 +138,7 @@ class ForcedSourceInfo(NamedTuple):
 
     diaObjectId: int
     diaForcedSourceId: int
-    time_processed: datetime.datetime
+    timeProcessedMjdTai: float
     midpointMjdTai: float
     visit: int
     detector: int
@@ -136,7 +147,7 @@ class ForcedSourceInfo(NamedTuple):
 
     @staticmethod
     def from_pandas(df: pandas.DataFrame) -> list[ForcedSourceInfo]:
-        """Make list of SourceInfos from pandas DataFrame.
+        """Make list of ForcedSourceInfos from pandas DataFrame.
 
         Parameters
         ----------
@@ -153,7 +164,7 @@ class ForcedSourceInfo(NamedTuple):
             info = ForcedSourceInfo(
                 diaObjectId=row.diaObjectId,
                 diaForcedSourceId=row.diaForcedSourceId,
-                time_processed=row.time_processed.replace(tzinfo=datetime.UTC),
+                timeProcessedMjdTai=row.timeProcessedMjdTai,
                 midpointMjdTai=row.midpointMjdTai,
                 visit=row.visit,
                 detector=row.detector,
@@ -166,8 +177,8 @@ class ForcedSourceInfo(NamedTuple):
 
     @staticmethod
     def group_by_object(infos: Collection[ForcedSourceInfo]) -> dict[int, list[ForcedSourceInfo]]:
-        """Group ForcedSourceInfos by diaObjectId, ordering them in each group
-        by midpointTaiMjd.
+        """Group ForcedSourceInfos by ``diaObjectId``, ordering them in each
+        group by ``midpointMjdTai``.
 
         Parameters
         ----------
@@ -177,7 +188,7 @@ class ForcedSourceInfo(NamedTuple):
         Returns
         -------
         sources : `dict`
-            ForcedSources grouped bu diaObjectId.
+            ForcedSources grouped by diaObjectId.
         """
         info_map = defaultdict(list)
         for info in infos:

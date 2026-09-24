@@ -45,7 +45,7 @@ def main(args: Sequence[str] | None = None) -> None:
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _partition_subcommand(subparsers)
     _dump_subcommand(subparsers)
-    _delete_subcommand(subparsers)
+    _update_subcommand(subparsers)
 
     parsed_args = parser.parse_args(args)
     log_cli.process_args(parsed_args)
@@ -60,6 +60,7 @@ def _dump_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("dump", help="Dump APDB contents.")
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _dump_visit_subcommand(subparsers)
+    _dump_objects_with_no_sources(subparsers)
 
 
 def _dump_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
@@ -75,14 +76,39 @@ def _dump_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(method=scripts.dump_visit)
 
 
-def _delete_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("delete", help="Delete APDB contents.")
+def _dump_objects_with_no_sources(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "objects-with-no-sources", help="Dump DiaObjects that have no associated DiaSources."
+    )
+    parser.add_argument(
+        "-n",
+        "--num-pixels",
+        type=int,
+        default=64,
+        help="Number of database pixels to process at once, default: %(default)s.",
+    )
+    parser.add_argument(
+        "-j",
+        "--jsonl",
+        default=None,
+        help="Name of the file to dump found DiaObjects to as JSON lines.",
+    )
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("pixel", help="Sky pixel, e.g. MQ3C:3[640]; must match database pixelization.")
+    parser.set_defaults(method=scripts.dump_objects_with_no_sources)
+
+
+def _update_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("update", help="Update APDB contents.")
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _delete_visit_subcommand(subparsers)
+    _set_validity_end_subcommand(subparsers)
 
 
 def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("visit", help="Delete DiaObjects first created in a particular visit.")
+    parser = subparsers.add_parser(
+        "delete-visit", help="Delete DiaObjects first created in a particular visit."
+    )
     parser.add_argument("butler_config", help="Butler configuration URI.")
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.add_argument("instrument", help="Instrument name.")
@@ -101,6 +127,27 @@ def _delete_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
         help="Only selete objects that have no associated sources, and delete associated forced sources.",
     )
     parser.set_defaults(method=scripts.delete_visit)
+
+
+def _set_validity_end_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("set-validity-end", help="Update validityEnd for DiaObjects.")
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("jsonl", help="Name of the file with DiaObjects in JSON lines format.")
+    parser.add_argument(
+        "--time",
+        default=None,
+        help=(
+            "Time in astropy ISOT format and TAI scale to use for validityEnd, "
+            "default is to use current time."
+        ),
+    )
+    parser.add_argument(
+        "--update",
+        default=False,
+        action="store_true",
+        help="Actually update, by default only print records to be updated.",
+    )
+    parser.set_defaults(method=scripts.set_validity_end)
 
 
 def _partition_subcommand(subparsers: argparse._SubParsersAction) -> None:

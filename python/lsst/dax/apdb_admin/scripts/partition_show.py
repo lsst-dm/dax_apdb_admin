@@ -101,7 +101,7 @@ def partition_show_time_part(apdb_config: str, timestamps: Collection[str], long
     timestamps : `~collections.abc.Collection` [`str`]
         List of timestamps, in "isot" format and TAI scale.
     long : `bool`
-        If Trtue also show period for each entry.
+        If True also show period for each entry.
     """
     ts = sorted(astropy.time.Time(timestamp_str, format="isot", scale="tai") for timestamp_str in timestamps)
     if not ts:
