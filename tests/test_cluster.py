@@ -21,12 +21,9 @@
 
 from __future__ import annotations
 
-import logging
 import unittest
 
 from lsst.dax.apdb_admin import cluster
-
-logging.basicConfig(level=logging.DEBUG)
 
 
 class _XY:
@@ -41,19 +38,19 @@ class ClusterTestCase(unittest.TestCase):
     def test_cluster_by_xy(self) -> None:
         """Test 'cluster_by_xy' method."""
         xys = [
-            _XY(x=0.0, y=0.01),
-            _XY(x=0.01, y=0.0),
-            _XY(x=-0.01, y=-0.01),
-            _XY(x=1.0, y=0.01),
-            _XY(x=1.01, y=0.02),
-            _XY(x=1.0, y=1.0),
-            _XY(x=1000.0, y=99.99),
-            _XY(x=999.98, y=100.01),
+            _XY(x=0.0, y=0.5),
+            _XY(x=0.4, y=0.0),
+            _XY(x=-0.4, y=-0.5),
+            _XY(x=10.0, y=0.1),
+            _XY(x=11.0, y=0.5),
+            _XY(x=10.0, y=10.0),
+            _XY(x=1000.0, y=99.5),
+            _XY(x=999.4, y=100.5),
         ]
 
         clusters = cluster.cluster_by_xy(xys)
         self.assertEqual(len(clusters), 4)
-        self.assertEqual(set(clusters), {(0.0, 0.0), (1.005, 0.015), (1.0, 1.0), (999.99, 100.0)})
+        self.assertEqual(set(clusters), {(0.0, 0.0), (10.5, 0.3), (10.0, 10.0), (999.7, 100.0)})
         self.assertCountEqual([len(c) for c in clusters.values()], [3, 2, 1, 2])
 
 

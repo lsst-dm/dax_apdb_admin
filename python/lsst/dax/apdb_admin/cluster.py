@@ -38,7 +38,7 @@ class ObjectWithXY(Protocol):
 
 
 def cluster_by_xy[T: ObjectWithXY](
-    objects: Iterable[T], max_dist: float = 0.1
+    objects: Iterable[T], max_dist: float = 1.2
 ) -> dict[tuple[float, float], list[T]]:
     """Cluster object by position.
 
@@ -89,5 +89,8 @@ def cluster_by_xy[T: ObjectWithXY](
             min_cluster_distance,
             avg_cluster_size,
         )
+
+        if min_cluster_distance < 2.0:
+            raise ValueError(f"CLusters are very close: {min_cluster_distance}")
 
     return result

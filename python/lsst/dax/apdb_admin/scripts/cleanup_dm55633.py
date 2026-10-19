@@ -48,6 +48,8 @@ from lsst.dax.apdb.cassandra.queries import Column as C  # noqa: N817
 from lsst.dax.apdb.cassandra.queries import Delete, Insert, Select
 from lsst.utils.iteration import chunk_iterable
 
+from ..cluster import cluster_by_xy
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -87,6 +89,8 @@ class DiaSource(Protocol):
     visit: int
     detector: int
     midpointMjdTai: float
+    x: float
+    y: float
 
     def _asdict(self) -> dict[str, Any]: ...
 
@@ -99,7 +103,7 @@ class DiaSource(Protocol):
 def _fmt_src(rec: DiaSource) -> str:
     return (
         f"id={rec.diaSourceId} ra={rec.ra} dec={rec.dec} "
-        f"part={rec.apdb_part} obj_id={rec.diaObjectId} ss_id={rec.ssObjectId}"
+        f"part={rec.apdb_part} obj_id={rec.diaObjectId} ss_id={rec.ssObjectId} x={rec.x} y={rec.y}"
     )
 
 
@@ -116,6 +120,8 @@ class DiaSourceReplica(Protocol):
     visit: int
     detector: int
     midpointMjdTai: float
+    x: float
+    y: float
 
     def _asdict(self) -> dict[str, Any]: ...
 
@@ -129,7 +135,7 @@ def _fmt_src_rep(rec: DiaSourceReplica, partitioner: Any) -> str:
     part = partitioner.pixel(rec.ra, rec.dec)
     return (
         f"id={rec.diaSourceId} ra={rec.ra} dec={rec.dec} "
-        f"part={part} obj_id={rec.diaObjectId} ss_id={rec.ssObjectId}"
+        f"part={part} obj_id={rec.diaObjectId} ss_id={rec.ssObjectId} x={rec.x} y={rec.y}"
     )
 
 
@@ -163,6 +169,8 @@ class SourceRecord(NamedTuple):
     visit: int
     detector: int
     midpointMjdTai: float
+    x: float
+    y: float
 
     @classmethod
     def from_row(cls, time_part: int, row: DiaSource) -> SourceRecord:
@@ -186,6 +194,8 @@ class SourceRecord(NamedTuple):
             visit=row.visit,
             detector=row.detector,
             midpointMjdTai=row.midpointMjdTai,
+            x=row.x,
+            y=row.y,
         )
 
     @classmethod
@@ -207,6 +217,8 @@ class SourceRecord(NamedTuple):
             visit=int(csv_dict["visit"]),
             detector=int(csv_dict["detector"]),
             midpointMjdTai=float(csv_dict["midpointMjdTai"]),
+            x=float(csv_dict["x"]),
+            y=float(csv_dict["y"]),
         )
 
     @classmethod
@@ -228,6 +240,8 @@ class ReplicaSourceRecord(NamedTuple):
     dec: float
     visit: int
     detector: int
+    x: float
+    y: float
 
     @classmethod
     def from_row(cls, row: DiaSourceReplica) -> ReplicaSourceRecord:
@@ -241,6 +255,8 @@ class ReplicaSourceRecord(NamedTuple):
             dec=row.dec,
             visit=row.visit,
             detector=row.detector,
+            x=row.x,
+            y=row.y,
         )
 
     @classmethod
@@ -261,6 +277,8 @@ class ReplicaSourceRecord(NamedTuple):
             dec=float(csv_dict["dec"]),
             visit=int(csv_dict["visit"]),
             detector=int(csv_dict["detector"]),
+            x=int(csv_dict["x"]),
+            y=int(csv_dict["y"]),
         )
 
     @classmethod
@@ -356,6 +374,7 @@ class CloseValidityRecord(NamedTuple):
     update_order: int
     apdb_replica_chunk: int
     apdb_replica_subchunk: int
+    update_unique_id: uuid.UUID
     diaObjectId: int
     ra: float
     dec: float
@@ -372,6 +391,7 @@ class CloseValidityRecord(NamedTuple):
             update_order=row.update_order,
             apdb_replica_chunk=row.apdb_replica_chunk,
             apdb_replica_subchunk=row.apdb_replica_subchunk,
+            update_unique_id=row.update_unique_id,
             diaObjectId=update_payload["diaObjectId"],
             ra=update_payload["ra"],
             dec=update_payload["dec"],
@@ -385,6 +405,7 @@ class RecordUpdates(NamedTuple):
     drop_replica_records: list[DiaSourceReplica] = []
     keep_reassign_records: list[SourceReassignRecord] = []
     drop_reassign_records: list[SourceReassignRecord] = []
+    extra_reassign_records: list[SourceReassignRecord] = []
 
     def merge(self, other: RecordUpdates) -> RecordUpdates:
         return RecordUpdates(
@@ -392,6 +413,7 @@ class RecordUpdates(NamedTuple):
             drop_replica_records=self.drop_replica_records + other.drop_replica_records,
             keep_reassign_records=self.keep_reassign_records + other.keep_reassign_records,
             drop_reassign_records=self.drop_reassign_records + other.drop_reassign_records,
+            extra_reassign_records=self.extra_reassign_records + other.extra_reassign_records,
         )
 
 
@@ -423,6 +445,29 @@ class DiaSourceToPartition(NamedTuple):
             apdb_replica_subchunk=record.apdb_replica_subchunk,
             apdb_time_part=apdb_time_part,
         )
+
+
+class UpdateOrderFactory:
+    _max_updateOrder: dict[tuple[int, int, int], int] = {}
+
+    @classmethod
+    def update(
+        cls, apdb_replica_chunk: int, apdb_replica_subchunk: int, update_time_ns: int, update_order: int
+    ) -> None:
+        if (
+            cls._max_updateOrder.get((apdb_replica_chunk, apdb_replica_subchunk, update_time_ns), 0)
+            < update_order
+        ):
+            cls._max_updateOrder[(apdb_replica_chunk, apdb_replica_subchunk, update_time_ns)] = update_order
+
+    @classmethod
+    def get(cls, apdb_replica_chunk: int, apdb_replica_subchunk: int, update_time_ns: int) -> int:
+        update_order = cls._max_updateOrder.setdefault(
+            (apdb_replica_chunk, apdb_replica_subchunk, update_time_ns), 0
+        )
+        update_order += 1
+        cls._max_updateOrder[(apdb_replica_chunk, apdb_replica_subchunk, update_time_ns)] = update_order
+        return update_order
 
 
 def find_visit_detector(apdb_config: str) -> None:
@@ -894,19 +939,19 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
         )
 
     _LOG.info(
-        "%d replica records to keep, %d to drop; %d reassign records to keep, %d to drop",
+        "%d replica records to keep, %d to drop; %d reassign records to keep, %d to drop, "
+        "%d extra reassignments",
         len(record_updates.keep_initial_records),
         len(record_updates.drop_replica_records),
         len(record_updates.keep_reassign_records),
         len(record_updates.drop_reassign_records),
+        len(record_updates.extra_reassign_records),
     )
-
-    # Generate reassign records for DiaSources which were shadowed.
-    special_reassigns = _special_reassigns(record_updates.keep_initial_records, reassign_records)
 
     # Reapply DiaObject reassignments to the initial records.
     to_keep = _reassign_initial_records(
-        record_updates.keep_initial_records, record_updates.keep_reassign_records + special_reassigns
+        record_updates.keep_initial_records,
+        record_updates.keep_reassign_records + record_updates.extra_reassign_records,
     )
 
     # Drop/re-create DiaSources in regular table.
@@ -925,7 +970,7 @@ def cleanup_sources(apdb_config: str, visit_detector: str, output_archive: str, 
     _drop_reassignments(apdb, record_updates.drop_reassign_records, archive, update)
 
     # Add source reassignments.
-    _insert_reassignments(apdb, special_reassigns, archive, update)
+    _insert_reassignments(apdb, record_updates.extra_reassign_records, archive, update)
 
     # Fix records in DiaSourceToPartition table.
     _fix_dia_source_partition(
@@ -1039,6 +1084,13 @@ def _find_replica_sources(
     return vd_sources
 
 
+def _match_relpica_reassign(
+    rec1: DiaSourceReplica,
+    rec2: SourceReassignRecord,
+) -> bool:
+    return rec1.diaSourceId == rec2.diaSourceId and rec1.ra == rec2.ra and rec1.dec == rec2.dec
+
+
 def _same_replica_source(
     rec1: DiaSourceReplica,
     rec2: DiaSourceReplica,
@@ -1055,7 +1107,7 @@ def _same_replica_source(
         dict1 = rec1._asdict()
         dict2 = rec2._asdict()
 
-        drop_columns = ["apdb_replica_chunk", "apdb_replica_subchunk"]
+        drop_columns = ["apdb_replica_chunk", "apdb_replica_subchunk", "timeProcessedMjdTai"]
         if ignore:
             if isinstance(ignore, str):
                 drop_columns.append(ignore)
@@ -1077,23 +1129,26 @@ def _same_position(
 
 
 def _dump_records(
-    replica_records: list[DiaSourceReplica],
+    initial_record: DiaSourceReplica | None,
+    repro_records: list[DiaSourceReplica],
     reassign_records: list[SourceReassignRecord],
     regular_sources: list[DiaSource],
     partitioner: Partitioner,
 ) -> None:
-    if replica_records:
+    if initial_record:
         _LOG.debug(
             "  initial replica: chunk=%d %s",
-            replica_records[0].apdb_replica_chunk,
-            _fmt_src_rep(replica_records[0], partitioner),
+            initial_record.apdb_replica_chunk,
+            _fmt_src_rep(initial_record, partitioner),
         )
-        for record in replica_records[1:]:
-            _LOG.debug(
-                "  re-proc replica: chunk=%d %s",
-                record.apdb_replica_chunk,
-                _fmt_src_rep(record, partitioner),
-            )
+    else:
+        _LOG.debug("  initial replica: none")
+    for record in repro_records:
+        _LOG.debug(
+            "  re-proc replica: chunk=%d %s",
+            record.apdb_replica_chunk,
+            _fmt_src_rep(record, partitioner),
+        )
     for reassign in reassign_records:
         _LOG.debug(
             "  reassign record: chunk=%d %s",
@@ -1135,21 +1190,26 @@ def _calc_record_updates(
     # For regular DiaSource table we want to have records that were created
     # in the first processing of the visit/detector and "undo" all updates
     # by further re-processing runs. This is complicated by the DiaSource
-    # deduplication which was executed between re-processing runs. So in
-    # addition to just re-creating records from the initial processing we need
-    # to update diaObjectId of some of those initial records. This could be
-    # potentially ambiguous as DiaObject deduplication used DiaSources from
+    # deduplication which can happen either before or after re-processing runs.
+    # So in addition to just re-creating records from the initial processing we
+    # need to update diaObjectId of some of those initial records. This could
+    # be potentially ambiguous as DiaObject deduplication used DiaSources from
     # later re-processing.
     #
     # The plan of attack:
-    #  - group and order replica DiaSources according to replica chunk, the
-    #    first chunk is the initial processing, the rest are re-processing;
-    #    in most cases there is just on re-processing but there could be 2 or 3
+    #  - cluster replica DiaSources by position, assume that DiaSources in the
+    #    same cluster belong to the same DiaObject (or its duplicate,
+    #    duplicates are eliminated by deduplication)
+    #  - order replica DiaSources according to replica chunk, the first chunk
+    #    can be from initial processing, the rest are re-processing;
+    #    sometimes initial replica do not exist, all replicas are from
+    #    reprocessing
+    #  - in most cases there is just on re-processing but there could be 2 or 3
     #  - find all SourceReassignRecord for all replica DiaSources in this v/d,
     #    group and order them by their replica chunk
-    #  - for each re-assign chunk find earlier replica sources chunks and
-    #    apply DiaObject re-assignment on those chunks, if diaSourceId exists
-    #    in more than one chunk, re-assign all of them.
+    #  - drop reprocessed replicas and some reassign records, new reassign
+    #    records may be needed if DiaObject of an initial replica was
+    #    deduplicated
     #  - verify that after the last re-assignment no DiaSource from initial
     #    processing is assigned to diaSource from ``closed_dia_object_ids``
     #
@@ -1165,44 +1225,55 @@ def _calc_record_updates(
     #    - drop record that do not match a record from the initial processing
     #    - if there are no records that match a record from the initial
     #      processing then recreate that record
+    _LOG.debug("_calc_record_updates: %s, initial_chunk=%d", vd, initial_chunk)
 
     closed_dia_object_ids = {rec.diaObjectId: rec for rec in close_validity_records}
 
-    # All diaSourceId for this visit/detector.
-    all_source_ids = {source.diaSourceId for source in replica_sources}
-
-    # Group DiaSource replica records by replica chunks.
-    id_getter = attrgetter("diaSourceId")
-    replicas_by_id: dict[int, list[DiaSourceReplica]] = {
-        chunk: list(recs)
-        for chunk, recs in itertools.groupby(sorted(replica_sources, key=id_getter), id_getter)
-    }
-
-    regular_sources_by_id: dict[int, list[DiaSource]] = {
-        src_id: list(recs)
-        for src_id, recs in itertools.groupby(sorted(regular_sources, key=id_getter), id_getter)
-    }
-
-    _LOG.debug("_calc_record_updates: %s, initial_chunk=%d", vd, initial_chunk)
-
+    # Cluster DiaSource replica records by position an order by replica chunks.
     chunk_getter = attrgetter("apdb_replica_chunk")
+    replica_clusters: dict[tuple[float, float], list[DiaSourceReplica]] = {
+        xy: sorted(recs, key=chunk_getter) for xy, recs in cluster_by_xy(replica_sources).items()
+    }
+
+    _LOG.debug(
+        "_calc_record_updates: %s, initial_chunk=%d, cluster count = %s",
+        vd,
+        initial_chunk,
+        len(replica_clusters),
+    )
+
     keep_initial_records: list[DiaSourceReplica] = []
     drop_replica_records: list[DiaSourceReplica] = []
     keep_reassign_records: list[SourceReassignRecord] = []
     drop_reassign_records: list[SourceReassignRecord] = []
+    extra_reassign_records: list[SourceReassignRecord] = []
 
-    for source_id in sorted(all_source_ids):
-        reassign_records = sorted(source_reassignments.get(source_id, []), key=chunk_getter)
-        replica_records = sorted(replicas_by_id[source_id], key=chunk_getter)
+    for xy, replica_records in replica_clusters.items():
+        replica_records.sort(key=chunk_getter)
+        source_ids = {source.diaSourceId for source in replica_records}
+
+        reassign_records: list[SourceReassignRecord] = []
+        for source_id in source_ids:
+            rers = source_reassignments.get(source_id, [])
+            for rer in rers:
+                for replica in replica_records:
+                    if rer.diaSourceId == replica.diaSourceId and _same_position(replica, rer):
+                        reassign_records.append(rer)
+                        break
+        reassign_records.sort()
+
         _LOG.debug(
-            "_calc_record_updates: "
-            "source_id=%s initial_chunk=%d replica_chunks=%s reassign_chunks=%s n_regular_sources=%d",
-            source_id,
+            "_calc_record_updates: xy=%s initial_chunk=%d replica_chunks=%s reassign_chunks=%s",
+            xy,
             initial_chunk,
             [r.apdb_replica_chunk for r in replica_records],
             [r.apdb_replica_chunk for r in reassign_records],
-            len(regular_sources_by_id[source_id]),
         )
+
+        # Sanity check.
+        assert replica_records[0].apdb_replica_chunk >= initial_chunk, "Replica chunk inconsistency."
+        if len(replica_records) > 1:
+            assert replica_records[1].apdb_replica_chunk > initial_chunk, "Replica chunk inconsistency."
 
         # case 1 (see dm55633-notes.md)
         if replica_records[0].apdb_replica_chunk != initial_chunk:
@@ -1211,136 +1282,216 @@ def _calc_record_updates(
             drop_reassign_records += reassign_records
             continue
 
-        # case 2
         initial_record = replica_records[0]
-        if len(replica_records) == 1:
+        repro_records = replica_records[1:]
+        del replica_records
+
+        # We always keep initial record and eleiminate reprocessing records.
+        keep_initial_records.append(initial_record)
+        drop_replica_records += repro_records
+
+        if _LOG.isEnabledFor(logging.DEBUG):
+            sources = [source for source in regular_sources if source.diaSourceId in source_ids]
+            _dump_records(initial_record, repro_records, reassign_records, sources, partitioner)
+
+        # Decide what to do with reassignments.
+
+        # case 2
+        if not repro_records:
             _LOG.debug("_calc_record_updates: #2 only the initial record")
-            keep_initial_records.append(initial_record)
             keep_reassign_records += reassign_records
             continue
 
-        # cases 3-4
-        if len(replica_records) > 1 and not reassign_records:
-            if all(_same_replica_source(initial_record, rec) for rec in replica_records[1:]):
-                _LOG.debug("_calc_record_updates: #3 no reassign, all replicas are the same")
-                keep_initial_records.append(initial_record)
-                drop_replica_records += replica_records[1:]
-            else:
-                _LOG.debug("_calc_record_updates: #4 no reassign, replicas are different")
-                # DiaSources with valid DiaObjects
-                valid_records = [
-                    rec for rec in replica_records if rec.diaObjectId not in closed_dia_object_ids
-                ]
-                if valid_records:
-                    keep_initial_records.append(valid_records[0])
-                    drop_replica_records += [rec for rec in replica_records if rec is not valid_records[0]]
-                else:
-                    drop_replica_records += replica_records
+        assert len(repro_records) > 0, "Must be at least one reprocessed record."
+
+        # cases 3
+        if not reassign_records and all(_same_replica_source(initial_record, rec) for rec in repro_records):
+            _LOG.debug("_calc_record_updates: #3 no reassign, all replicas are the same")
             continue
 
-        assert len(replica_records) > 1 and reassign_records, (
-            "There is one or more reassign record and a few replica records"
-        )
+        # cases 4
+        if not reassign_records:
+            _LOG.debug("_calc_record_updates: #4 no reassign, replicas are different")
+            # Replicas are different, if the difference is in diaObjectId check
+            # which one DiaObject was not removed.
+            if initial_record.diaObjectId not in closed_dia_object_ids:
+                continue
+            else:
+                # Initial DiaObject is invalidated, find DiaObject that
+                # survived deduplication.
+                _LOG.debug("    need to handle reassignment for diaSourceId=%d", initial_record.diaSourceId)
+
+                reassign_record = _make_reassign_record(
+                    initial_record,
+                    repro_records,
+                    closed_dia_object_ids,
+                )
+                if reassign_record:
+                    extra_reassign_records.append(reassign_record)
+
+                continue
+
+        assert len(reassign_records) > 0, "Shall have one or more reassign records"
 
         # case 5
         if (
             len(reassign_records) == 1
-            and reassign_records[0].apdb_replica_chunk < replica_records[1].apdb_replica_chunk
+            and reassign_records[0].apdb_replica_chunk < repro_records[0].apdb_replica_chunk
         ):
             _LOG.debug("_calc_record_updates: #5 single reassign for initial record")
-            keep_initial_records.append(initial_record)
-            drop_replica_records += replica_records[1:]
-            keep_reassign_records += reassign_records
+            # DiaObject from reassign record could still be invalidated by
+            # deduplication.
+            if reassign_records[0].diaObjectId not in closed_dia_object_ids:
+                keep_reassign_records += reassign_records
+            else:
+                drop_reassign_records += reassign_records
+                reassign_record = _make_reassign_record(
+                    initial_record,
+                    repro_records,
+                    closed_dia_object_ids,
+                )
+                if reassign_record:
+                    extra_reassign_records.append(reassign_record)
             continue
 
+        assert reassign_records, "There is one or more reassign records"
+
         # case 6
-        if reassign_records[0].apdb_replica_chunk > replica_records[-1].apdb_replica_chunk and all(
-            _same_replica_source(initial_record, rec) for rec in replica_records[1:]
+        if reassign_records[0].apdb_replica_chunk > repro_records[-1].apdb_replica_chunk and all(
+            _same_replica_source(initial_record, rec) for rec in repro_records
         ):
             _LOG.debug("_calc_record_updates: #6 after-repro reassigns, all replicas are the same")
-            keep_initial_records.append(initial_record)
-            drop_replica_records += replica_records[1:]
             keep_reassign_records += reassign_records
             continue
 
         # cases 7-8
         if (
-            all(_same_position(initial_record, rec) for rec in replica_records[1:])
+            initial_record.diaObjectId is not None
+            and initial_record.ssObjectId is None
             and len(reassign_records) == 1
-            and reassign_records[0].apdb_replica_chunk > replica_records[-1].apdb_replica_chunk
+            and all(_same_replica_source(initial_record, rec, ignore="diaObjectId") for rec in repro_records)
+            and reassign_records[0].apdb_replica_chunk > repro_records[-1].apdb_replica_chunk
         ):
             if reassign_records[0].diaObjectId == initial_record.diaObjectId:
                 _LOG.debug("_calc_record_updates: #7 reset diaObjectId to original")
-                keep_initial_records.append(initial_record)
-                drop_replica_records += replica_records[1:]
-                drop_reassign_records += reassign_records
-            else:
-                _LOG.debug("_calc_record_updates: #8 diaObjectId re-assign")
-                keep_initial_records.append(initial_record)
-                drop_replica_records += replica_records[1:]
-                keep_reassign_records += reassign_records
-            continue
-
-        # case 9
-        if initial_record.diaObjectId is None:
-            if (
-                len(replica_records) == 2
-                and len(reassign_records) == 1
-                and _same_position(initial_record, replica_records[1])
-            ):
-                _LOG.debug("_calc_record_updates: #9 diaObjectId is None in initial")
-                keep_initial_records.append(initial_record)
-                drop_replica_records += replica_records[1:]
                 drop_reassign_records += reassign_records
                 continue
+            elif reassign_records[0].diaSourceId == initial_record.diaSourceId:
+                _LOG.debug("_calc_record_updates: #8 diaObjectId re-assign")
+                keep_reassign_records += reassign_records
+                continue
+
+        # case 9
+        if (
+            initial_record.diaObjectId is None
+            and initial_record.ssObjectId is not None
+            and len(repro_records) == 1
+            and len(reassign_records) == 1
+            and repro_records[0].diaObjectId is not None
+            and repro_records[0].ssObjectId is None
+        ):
+            _LOG.debug("_calc_record_updates: #9 diaObjectId is None in initial")
+            assert _match_relpica_reassign(repro_records[0], reassign_records[0])
+            drop_reassign_records += reassign_records
+            continue
 
         # case 10
-        if len(replica_records) == 2 and not _same_position(initial_record, replica_records[1]):
-            _LOG.debug("_calc_record_updates: #10 positions do not match")
-            keep_initial_records.append(initial_record)
-            drop_replica_records += replica_records[1:]
-            for rr in reassign_records:
-                if _same_position(rr, initial_record):
-                    keep_reassign_records.append(rr)
-                elif _same_position(rr, replica_records[1]):
-                    drop_reassign_records.append(rr)
-                else:
-                    raise RuntimeError(f"Reassignment record does not match: {rr}")
+        if len(repro_records) == 1 and repro_records[0].diaSourceId != initial_record.diaSourceId:
+            _LOG.debug("_calc_record_updates: #10 diaSourceId do not match")
+            if initial_record.diaObjectId not in closed_dia_object_ids:
+                drop_reassign_records += reassign_records
+            else:
+                for rr in reassign_records:
+                    if (
+                        _match_relpica_reassign(initial_record, rr)
+                        and rr.diaObjectId not in closed_dia_object_ids
+                    ):
+                        keep_reassign_records.append(rr)
+                        drop_reassign_records.extend(r for r in reassign_records if r is not rr)
+                        reassign_records = []
+                        break
+                for rr in reassign_records:
+                    if (
+                        _match_relpica_reassign(repro_records[0], rr)
+                        and rr.diaObjectId not in closed_dia_object_ids
+                    ):
+                        rr = rr._replace(
+                            diaSourceId=initial_record.diaSourceId,
+                            ra=initial_record.ra,
+                            dec=initial_record.dec,
+                        )
+                        extra_reassign_records.append(rr)
+                        drop_reassign_records += reassign_records
+                        reassign_records = []
+                        break
+                if reassign_records:
+                    # Means that we could not find a match among reassigns,
+                    # try to make it from reprocessed record.
+                    reassign_record = _make_reassign_record(
+                        initial_record,
+                        repro_records,
+                        closed_dia_object_ids,
+                    )
+                    if reassign_record:
+                        extra_reassign_records.append(reassign_record)
             continue
 
         # case 11
         if (
-            len(replica_records) == 2
-            and _same_position(initial_record, replica_records[1])
+            len(repro_records) == 1
+            and _same_replica_source(initial_record, repro_records[0], ignore="diaObjectId")
             and len(reassign_records) == 2
-            and reassign_records[0].apdb_replica_chunk > replica_records[1].apdb_replica_chunk
+            and reassign_records[0].apdb_replica_chunk > repro_records[0].apdb_replica_chunk
         ):
             _LOG.debug("_calc_record_updates: #11 two reassignments after reprocessing")
-            keep_initial_records.append(initial_record)
-            drop_replica_records += replica_records[1:]
             drop_reassign_records.append(reassign_records[0])
             keep_reassign_records.append(reassign_records[1])
             continue
 
         # case 12
         if (
-            len(replica_records) == 2
-            and _same_position(initial_record, replica_records[1])
+            len(repro_records) == 1
+            and initial_record.diaSourceId == repro_records[0].diaSourceId
             and len(reassign_records) == 2
-            and reassign_records[0].apdb_replica_chunk < replica_records[1].apdb_replica_chunk
-            and reassign_records[1].apdb_replica_chunk > replica_records[1].apdb_replica_chunk
+            and reassign_records[0].apdb_replica_chunk < repro_records[0].apdb_replica_chunk
+            and reassign_records[1].apdb_replica_chunk > repro_records[0].apdb_replica_chunk
         ):
             _LOG.debug("_calc_record_updates: #12 two reassignments, first before reprocessing")
-            keep_initial_records.append(initial_record)
-            drop_replica_records += replica_records[1:]
-            keep_reassign_records.append(reassign_records[0])
-            drop_reassign_records.append(reassign_records[1])
+            if reassign_records[0].diaObjectId not in closed_dia_object_ids:
+                keep_reassign_records.append(reassign_records[0])
+                drop_reassign_records.append(reassign_records[1])
+            elif reassign_records[1].diaObjectId not in closed_dia_object_ids:
+                keep_reassign_records.append(reassign_records[1])
+                drop_reassign_records.append(reassign_records[0])
+            else:
+                # Drop both reassignments, but this will leave initial record
+                # unassociated.
+                drop_reassign_records += reassign_records
             continue
 
+        # case 13
+        if (
+            len(repro_records) == 1
+            and initial_record.diaSourceId == repro_records[0].diaSourceId
+            and len(reassign_records) == 1
+            and reassign_records[0].apdb_replica_chunk > repro_records[0].apdb_replica_chunk
+        ):
+            _LOG.debug("_calc_record_updates: #13 one reassignment")
+            if initial_record.diaObjectId not in closed_dia_object_ids:
+                drop_reassign_records += reassign_records
+            else:
+                keep_reassign_records += reassign_records
+            continue
+
+        _LOG.debug("_calc_record_updates: #unknown")
+
     # Check that all records that we keep have valid DiaObject.
+    id_getter = attrgetter("diaSourceId")
     reassign_records_by_id = {
         key: sorted(items)
-        for key, items in itertools.groupby(sorted(keep_reassign_records, key=id_getter), id_getter)
+        for key, items in itertools.groupby(
+            sorted(keep_reassign_records + extra_reassign_records, key=id_getter), id_getter
+        )
     }
     object_ids: set[int] = set()
     sources_by_object_ids: dict[int, list[DiaSourceReplica]] = defaultdict(list)
@@ -1368,7 +1519,46 @@ def _calc_record_updates(
         drop_replica_records=drop_replica_records,
         keep_reassign_records=keep_reassign_records,
         drop_reassign_records=drop_reassign_records,
+        extra_reassign_records=extra_reassign_records,
     )
+
+
+def _make_reassign_record(
+    initial_record: DiaSourceReplica,
+    repro_records: list[DiaSourceReplica],
+    closed_dia_object_ids: dict[int, CloseValidityRecord],
+) -> SourceReassignRecord | None:
+    repro_object_ids = sorted(
+        {
+            rec.diaObjectId
+            for rec in repro_records
+            if rec.diaObjectId is not None and rec.diaObjectId not in closed_dia_object_ids
+        }
+    )
+    _LOG.debug("    repro diaObjectIds: %s", repro_object_ids)
+    if repro_object_ids and initial_record.diaObjectId is not None:
+        close_record = closed_dia_object_ids[initial_record.diaObjectId]
+        _LOG.debug("    close record for DiaObject: %s", close_record)
+        # Create reassign record for DiaSource, borrow some
+        # values from close record so that they appear near the
+        # same time.
+        update_order = UpdateOrderFactory.get(
+            close_record.apdb_replica_chunk, close_record.apdb_replica_subchunk, close_record.update_time_ns
+        )
+        return SourceReassignRecord(
+            update_time_ns=close_record.update_time_ns,
+            update_order=update_order,
+            apdb_replica_chunk=close_record.apdb_replica_chunk,
+            apdb_replica_subchunk=close_record.apdb_replica_subchunk,
+            update_unique_id=close_record.update_unique_id,
+            diaSourceId=initial_record.diaSourceId,
+            ra=initial_record.ra,
+            dec=initial_record.dec,
+            midpointMjdTai=initial_record.midpointMjdTai,
+            diaObjectId=repro_object_ids[0],
+        )
+    else:
+        return None
 
 
 def _recreate_regular_sources(
@@ -1866,8 +2056,20 @@ def _read_update_records(apdb: ApdbCassandra) -> tuple[list[SourceReassignRecord
             for row in result:
                 if reassign_record := SourceReassignRecord.from_row(row):
                     reassign_records.append(reassign_record)
+                    UpdateOrderFactory.update(
+                        reassign_record.apdb_replica_chunk,
+                        reassign_record.apdb_replica_subchunk,
+                        reassign_record.update_time_ns,
+                        reassign_record.update_order,
+                    )
                 elif close_validity_record := CloseValidityRecord.from_row(row):
                     close_validity_records.append(close_validity_record)
+                    UpdateOrderFactory.update(
+                        close_validity_record.apdb_replica_chunk,
+                        close_validity_record.apdb_replica_subchunk,
+                        close_validity_record.update_time_ns,
+                        close_validity_record.update_order,
+                    )
         else:
             _LOG.error("_read_update_records: error returned by query: %s", result)
             raise result
@@ -1995,72 +2197,3 @@ def _fix_dia_source_partition(
         _LOG.info("Inserted %d records into %s", len(inserts), table_name)
     else:
         _LOG.info("Would have inserted %d records into %s", len(inserts), table_name)
-
-
-def _special_reassigns(
-    initial_records: list[DiaSourceReplica], existing_reassign_records: list[SourceReassignRecord]
-) -> list[SourceReassignRecord]:
-    # Source ID to object ID reassignment.
-    extra_reassignments = {
-        170046118907347217: 170046094904918238,
-        170032897244266602: 313871013915918557,
-        170032897244266575: 313871015259144202,
-        170032897244266603: 170032883556155412,
-        170032897244266553: 170028492083691656,
-        170032897244266624: 170032885700493314,
-        170032897244266599: 313761043606142985,
-        170046083783720963: 170081276613623835,
-        170046086465454207: 170046073731022999,
-        170050480619126966: 170046073736790169,
-        170050481696014426: 170046073736790169,
-    }
-
-    # Filter relevant DiaObjects.
-    extra_reassignments_object_ids = set(extra_reassignments.values())
-    existing_reassign_records = [
-        rec for rec in existing_reassign_records if rec.diaObjectId in extra_reassignments_object_ids
-    ]
-
-    reassigned_initial_records = {
-        rec.diaSourceId: rec for rec in initial_records if rec.diaSourceId in extra_reassignments
-    }
-    assert len(reassigned_initial_records) == len(extra_reassignments)
-
-    obj_id_getter = attrgetter("diaObjectId")
-    by_object_id: dict[int, list[SourceReassignRecord]] = {
-        key: list(val)
-        for key, val in itertools.groupby(sorted(existing_reassign_records, key=obj_id_getter), obj_id_getter)
-    }
-
-    # Verify that existing reassignments all come from a single operation.
-    update_order_by_id = {}
-    for diaObjectId, reassignments in by_object_id.items():
-        assert len({rec.apdb_replica_chunk for rec in reassignments})
-        assert len({rec.apdb_replica_subchunk for rec in reassignments})
-        assert len({rec.update_time_ns for rec in reassignments})
-        assert len({rec.update_unique_id for rec in reassignments})
-        update_order_by_id[diaObjectId] = max(rec.update_order for rec in reassignments)
-
-    result = []
-    for diaSourceId, diaObjectId in extra_reassignments.items():
-        initial_record = reassigned_initial_records[diaSourceId]
-        existing_rec = by_object_id[diaObjectId][0]
-        update_order_by_id[diaObjectId] += 1
-        result.append(
-            SourceReassignRecord(
-                update_time_ns=existing_rec.update_time_ns,
-                update_order=update_order_by_id[diaObjectId],
-                apdb_replica_chunk=existing_rec.apdb_replica_chunk,
-                apdb_replica_subchunk=existing_rec.apdb_replica_subchunk,
-                update_unique_id=existing_rec.update_unique_id,
-                diaSourceId=diaSourceId,
-                ra=initial_record.ra,
-                dec=initial_record.dec,
-                midpointMjdTai=initial_record.midpointMjdTai,
-                diaObjectId=diaObjectId,
-            )
-        )
-
-    _LOG.info("Generated %d special reassignment records", len(result))
-
-    return result

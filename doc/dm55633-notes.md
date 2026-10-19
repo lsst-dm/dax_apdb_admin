@@ -38,20 +38,27 @@ Replica chunks
   |                       |  (second deduplication runs at 2026-03-05 05:10) |
 
 
+Processing
+----------
+
+Initial processing and reprocessing can generate DiaSource at the same position (or very close) with the same or different diaSourceId.
+Fixup algorithm clusters DiaSources from the same visit/detector by their distance from each other, allowed difference is 0.1 pixels or less.
+All DiaSources from the same cluster are considered the same even if their diaSourceIds are different.
+One diaSourceIds can belong to more than on cluster.
 
 Cases
 -----
 
 Definitions:
 - Initial record - DiaSource record from DiaSourceChunk table that was created in the first processing of the corresponding visit/detector.
-  For a given diaSourceId the initial record may not even exist (DiaSource appears only in re-processing).
+  For a given cluster the initial record may not even exist (DiaSource appears only in re-processing).
 - Reprocessed records - all records from the DiaSourceChunk tables that are not from the initial processing of visit/detector.
-- Source record(s) - records from DiaSource table for a diaSourceId, there could be more than one because of partitioning.
-- Reassignment record - update record corresponding to a diaSourceId.
+- Source record(s) - records from DiaSource table for a cluster, there could be more than one because of partitioning or multiple diaSourceIds.
+- Reassignment record - update record corresponding matching all initial and reprocessed records.
 
 Combinations of cases:
 
-1. No initial record for a given diaSourceId:
+1. No initial record for a given cluster:
 
    - have to drop all reprocessed records and reassignment records.
 
@@ -59,15 +66,16 @@ Combinations of cases:
 
    - keep initial record, no updates needed; keep reassign_records
 
-3. No reassignments records for this diaSourceId and reprocessed records are identical to the initial
+3. No reassignments records for this cluster and reprocessed records are identical to the initial
 
-   - drop reprocessed records
-   - no need to update source record
+   - keep initial record, drop reprocessed records
+   - no need to update source record (not quite true, there could be the same diaSourceId in a separate cluster)
 
-4. No reassignments records for this diaSourceId but reprocessed records are different in contents
+4. No reassignments records for this cluster, there is one or more reprocessed record which has different diaObjectId, and DiaObject for the initial record is invalidated
 
-   - if reprocessed diaObjectIds are the same as in initial record then drop reprocessed records
-   - if diaObjectIds are different from initial record then drop records whose diaObjectId was invalidated
+   - Could happen if there are two DiaObjects that are very close together, reprocessed record is assigned to a different DiaObject, and then first DiaObject is deduplicated
+   - drop reprocessed record.
+   - keep initial record but also add a new reassignment record (find an invalidation record and use a timestamp from there?)
 
 5. Single reassign record, comes before all reprocessed records
 
@@ -75,17 +83,15 @@ Combinations of cases:
   - keep initial record and reassign record
   - there is a complication for just four DiaSources
     - re-processed records moved by a tiny amount and they were associated to a different DiaObject
-    - later de-duplication deleted DiaObject that an initial record was associated to (after re-assignment), but DiaSource was not re-associated because later copy was associated to a different DiaObject
+    - later de-duplication deleted DiaObject that an initial record was associated to (after re-assignment), but initial DiaSource was not re-associated because later copy was associated to a different DiaObject
     - the fix in this case is to re-associate initial record to DiaObject on the re-processed record, but that may break causality
-    - alternative is to keep initial record associated with DiaObject that is invalidated.
-
 
 6. One or more reassign record which come after all reprocessed records, and reprocessed records are identical to the initial
 
   - drop reprocessed records
   - keep initial record and reassign records
 
-7. Reprocessed records are identical to initial except for diaObjectId. One reassign record which changes diaObjectId back to the inital
+7. Reprocessed records are identical to initial except for diaObjectId. One reassign record which changes diaObjectId back to the initial
 
   - drop reprocessed records
   - keep initial record
@@ -96,32 +102,39 @@ Combinations of cases:
   - drop reprocessed record
   - keep initial record and reassign record
 
-9. Initial record has diaObjectId=None (and ssObjectId not None), one reprocessed identical to initial except for diaObjectId and ssObjectId and one reassignment record:
+9. Initial record has diaObjectId=None (and ssObjectId not None), one reprocessed record with diaObjectId and ssObjectId=None and one reassignment record:
 
   - drop reprocessed records
   - keep initial record
   - drop reassign record
 
-10. A single reprocessed record, coordinates different from initial record, one or two reassignment records matching coordinates of one of replicas
+10. A single reprocessed record, diaSourceId different from initial record, one or two reassignment records matching diaSourceId of one of replicas
 
    - drop reprocessed record
    - drop reassignment record matching reprocessed record
    - keep initial record
    - keep reassignment record matching initial record
 
-11. A single reprocessed record, coordinates are identical to initial record, two reassignment records, both are later then reprocessed record:
+11. A single reprocessed record, identical to initial except for diaObjectId; two reassignment records:
 
    - drop reprocessed record
    - drop first reassignment record
    - keep initial record
    - keep second reassignment record
 
-12. A single reprocessed record, coordinates are identical to initial record, two reassignment records, first is before reprocessed record, reassignment can be to the same or different DiaObject:
+12. A single reprocessed record, diaSourceId identical to initial record (coordinates are different), two reassignment records, first is before reprocessed record, reassignment can be to the same or different DiaObject:
 
    - drop reprocessed record
    - keep initial record
-   - keep first reassignment record
-   - drop second reassignment record
+   - if the first reassignment diaObjectId is valid, keep it
+   - otherwise if the second reassignment diaObjectId is valid, keep it
+
+13. A single reprocessed record, diaSourceId identical to initial record (coordinates are different), one reassignment record later than reprocessed record:
+
+   - (similar to #6, but slightly different coordinates)
+   - drop reprocessed record
+   - keep initial record
+   - if the initial record diaObjectId is valid, drop reassignment, otherwise keep it
 
 DiaSources assigned to invalidated DiaObjects
 ---------------------------------------------
