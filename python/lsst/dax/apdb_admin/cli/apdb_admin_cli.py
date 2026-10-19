@@ -61,6 +61,7 @@ def _dump_subcommand(subparsers: argparse._SubParsersAction) -> None:
     subparsers = parser.add_subparsers(title="available subcommands", required=True)
     _dump_visit_subcommand(subparsers)
     _dump_objects_with_no_sources(subparsers)
+    _dump_sources_with_no_objects(subparsers)
 
 
 def _dump_visit_subcommand(subparsers: argparse._SubParsersAction) -> None:
@@ -96,6 +97,28 @@ def _dump_objects_with_no_sources(subparsers: argparse._SubParsersAction) -> Non
     parser.add_argument("apdb_config", help="APDB configuration URI.")
     parser.add_argument("pixel", help="Sky pixel, e.g. MQ3C:3[640]; must match database pixelization.")
     parser.set_defaults(method=scripts.dump_objects_with_no_sources)
+
+
+def _dump_sources_with_no_objects(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "sources-with-no-objects", help="Dump DiaSources whose associated DiaObjects are not valid."
+    )
+    parser.add_argument(
+        "-n",
+        "--num-pixels",
+        type=int,
+        default=64,
+        help="Number of database pixels to process at once, default: %(default)s.",
+    )
+    parser.add_argument(
+        "-j",
+        "--jsonl",
+        default=None,
+        help="Name of the file to dump found DiaObjects to as JSON lines.",
+    )
+    parser.add_argument("apdb_config", help="APDB configuration URI.")
+    parser.add_argument("pixel", help="Sky pixel, e.g. MQ3C:3[640]; must match database pixelization.")
+    parser.set_defaults(method=scripts.dump_sources_with_no_objects)
 
 
 def _update_subcommand(subparsers: argparse._SubParsersAction) -> None:

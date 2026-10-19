@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-__all__ = ["dump_objects_with_no_sources"]
+__all__ = ["dump_objects_with_no_sources", "dump_sources_with_no_objects"]
 
 import itertools
 import json
@@ -169,27 +169,13 @@ def dump_objects_with_no_sources(
         raise TypeError(f"Unsupported pixelization type {db_pixelator}")
 
     pixelization, pixel_id = utils.parse_pixel(pixel)
-    pix_level = pixelization.level
     if not isinstance(pixelization.pixelator, Mq3cPixelization):
         raise TypeError(f"Argument pixelization {pixel} does not match database pixelization {db_pixelator}")
-    db_pix_level = partitioner.pixelization.level
-    if pix_level >= db_pix_level:
-        raise ValueError(
-            f"Pixelization level ({pixelization.level}) is finer than database level ({db_pix_level})"
-        )
-
-    # Pixelization level for intermediate pixels.
-    mid_pix_level = db_pix_level - (log2(num_pixels) // 2)
-    if pix_level > mid_pix_level:
-        raise ValueError(
-            f"Pixelization level ({pixelization.level}) is higher than intermediate level ({mid_pix_level})"
-        )
-
-    jout = open(jsonl, "w") if jsonl else None
 
     # How many bits to shift to go from large pixel to intermediate and to tiny
-    shift = (mid_pix_level - pix_level) * 2
-    shift2 = (db_pix_level - mid_pix_level) * 2
+    shift, shift2 = _find_shifts(pixelization.level, partitioner.pixelization.level, num_pixels)
+
+    jout = open(jsonl, "w") if jsonl else None
 
     object_count = 0
     source_count = 0
@@ -239,6 +225,136 @@ def dump_objects_with_no_sources(
 
     if jout:
         jout.close()
+
+
+def dump_sources_with_no_objects(
+    apdb_config: str,
+    pixel: str,
+    num_pixels: int,
+    jsonl: str | None,
+) -> None:
+    """Find and dump DiaSources in the given region associated to DiaSources
+    that do not exist or are invalidated.
+
+    Parameters
+    ----------
+    apdb_config : `str`
+        APDB configuration location.
+    pixel : `str`
+        Pixel specification, e.g. "MQ3C:3[640]".
+    num_pixels : `int`
+        Number of database pixels to process at once.
+    jsonl : `str`, optional
+        Name of the file to dump found DiaObjects to as JSON lines.
+    """
+    apdb = _make_apdb(apdb_config)
+
+    context = apdb._context
+    partitioner = context.partitioner
+    db_pixelator = partitioner.pixelization.pixelator
+    if not isinstance(db_pixelator, Mq3cPixelization):
+        raise TypeError(f"Unsupported pixelization type {db_pixelator}")
+
+    pixelization, pixel_id = utils.parse_pixel(pixel)
+    if not isinstance(pixelization.pixelator, Mq3cPixelization):
+        raise TypeError(f"Argument pixelization {pixel} does not match database pixelization {db_pixelator}")
+
+    # How many bits to shift to go from large pixel to intermediate and to tiny
+    shift, shift2 = _find_shifts(pixelization.level, partitioner.pixelization.level, num_pixels)
+
+    jout = open(jsonl, "w") if jsonl else None
+
+    object_count = 0
+    source_count = 0
+    no_source_count = 0
+    for mid_pix_id in range(pixel_id << shift, (pixel_id + 1) << shift):
+        # Database pixels to query in this iteration.
+        db_pixels = list(range(mid_pix_id << shift2, (mid_pix_id + 1) << shift2))
+
+        # We need to query somewhat wider area when looking for DiaSources,
+        # just add all neighbor pixels.
+        neighbor_pixels = sorted(
+            set(itertools.chain.from_iterable(db_pixelator.neighborhood(db_pixel) for db_pixel in db_pixels))
+        )
+
+        _LOG.info(
+            "Intermediate pixel ID: %s, found %d database pixels and %d neighbors",
+            mid_pix_id,
+            len(db_pixels),
+            len(neighbor_pixels) - len(db_pixels),
+        )
+
+        dia_sources = _query_dia_sources(apdb, db_pixels)
+        source_object_ids = {
+            dia_source.diaObjectId for dia_source in dia_sources if dia_source.diaObjectId is not None
+        }
+        dia_objects = _query_dia_objects(apdb, neighbor_pixels)
+        object_ids = {dia_object.diaObjectId for dia_object in dia_objects}
+        diff = source_object_ids - object_ids
+        if diff:
+            _LOG.warning("Found %d DiaObjects without DiaSources:", len(diff))
+            for dia_source in dia_sources:
+                if dia_source.diaObjectId in diff:
+                    _LOG.warning("    %s", dia_source)
+
+                    if jout:
+                        json.dump(dia_source._asdict(), jout)
+                        print("", file=jout)
+
+        object_count += len(dia_objects)
+        source_count += len(dia_sources)
+        no_source_count += len(diff)
+
+    _LOG.info(
+        "Total %d objects, %d sources, %d sources with invalidated objects",
+        object_count,
+        source_count,
+        no_source_count,
+    )
+
+    if jout:
+        jout.close()
+
+
+def _find_shifts(coarse_pix_level: int, db_pix_level: int, num_pixels: int) -> tuple[int, int]:
+    """Calculate shifts in bits to go from large pixels to intermediates and
+    from intermediates to database pixels.
+
+    Parameters
+    ----------
+    coarse_pix_level
+        Pixelization level used in parameter.
+    db_pix_level
+        Pixelization level used in database partitioning.
+    num_pixels
+        Number of pixels in a single query, will be rounded down to the nearest
+        power of two.
+
+    Returns
+    -------
+    shift1
+        Number of bits to shift going from coarse pixels to intermediate.
+    shift2
+        Number of bits to shift going from intermediate level to database
+        level.
+    """
+    if coarse_pix_level >= db_pix_level:
+        raise ValueError(
+            f"Pixelization level ({coarse_pix_level}) is finer than database level ({db_pix_level})"
+        )
+
+    # Pixelization level for intermediate pixels.
+    mid_pix_level = db_pix_level - (log2(num_pixels) // 2)
+    if coarse_pix_level > mid_pix_level:
+        raise ValueError(
+            f"Pixelization level ({coarse_pix_level}) is higher than intermediate level ({mid_pix_level})"
+        )
+
+    # How many bits to shift to go from large pixel to intermediate and to tiny
+    shift = (mid_pix_level - coarse_pix_level) * 2
+    shift2 = (db_pix_level - mid_pix_level) * 2
+
+    return shift, shift2
 
 
 def _query_dia_objects(apdb: ApdbCassandra, db_pixels: list[int]) -> list[DiaObject]:
